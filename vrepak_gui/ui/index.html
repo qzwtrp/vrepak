@@ -77,7 +77,8 @@
 </footer>
 
 <script>
-const isTauri = !!window.__TAURI_INTERNALS__;
+const TAURI = window.__TAURI_INTERNALS__ || null;
+const isTauri = !!TAURI && typeof TAURI.invoke === 'function';
 function setStatus(msg, ok) {
   const el = document.getElementById('status');
   el.textContent = msg;
@@ -90,12 +91,10 @@ function showTab(name) {
   document.getElementById('tabPak').className = name === 'pak' ? 'active' : '';
 }
 async function invoke(cmd, args) {
-  if (isTauri) {
-    const { invoke } = await import('@tauri-apps/api/core');
-    return invoke(cmd, args);
-  } else {
-    throw new Error('Tauri backend not available (run via vrepak-gui). Frontend still works for preview.');
+  if (!isTauri) {
+    throw new Error('Tauri backend not connected. Run this UI via vrepak-gui, not by opening the HTML file directly.');
   }
+  return TAURI.invoke(cmd, args || {});
 }
 async function onSend() {
   const endpoint = document.getElementById('endpoint').value;
@@ -128,49 +127,69 @@ async function onOk() {
     setStatus('Saved to ' + path, true);
   } catch (e) { setStatus('Save failed: ' + e, false); }
 }
+function normDialogPath(r) {
+  if (!r) return null;
+  if (typeof r === 'string') return r;
+  if (Array.isArray(r)) return r.length ? normDialogPath(r[0]) : null;
+  if (typeof r === 'object') {
+    if (typeof r.path === 'string') return r.path;
+    if (Array.isArray(r.paths) && r.paths.length) return normDialogPath(r.paths[0]);
+    if (typeof r.value === 'string') return r.value;
+  }
+  return null;
+}
 async function browsePak() {
   try {
-    const { open } = await import('@tauri-apps/plugin-dialog');
-    const f = await open({ filters: [{ name: 'Pak', extensions: ['pak'] }] });
-    if (f) document.getElementById('pakPath').value = f;
-  } catch (e) { setStatus(String(e), false); }
+    const r = await invoke('plugin:dialog|open', { options: { filters: [{ name: 'Pak', extensions: ['pak'] }] } });
+    const p = normDialogPath(r);
+    if (p) document.getElementById('pakPath').value = p;
+    else setStatus('No file selected. You can also paste the .pak path manually.', null);
+  } catch (e) { setStatus('File dialog failed (' + e + '). Paste the .pak path manually.', false); }
 }
 function commonArgs() {
   return {
-    aesKey: document.getElementById('aesKey').value || null,
+    aes_key: document.getElementById('aesKey').value || null,
     endpoint: document.getElementById('endpoint').value || null,
     expression: document.getElementById('expression').value || null,
   };
 }
 async function onInfo() {
-  const pakPath = document.getElementById('pakPath').value;
+  const pak_path = document.getElementById('pakPath').value;
+  if (!pak_path) { document.getElementById('fileList').textContent = 'Set Pak file path first.'; return; }
   try {
-    const info = await invoke('pak_info', { pakPath, ...commonArgs() });
+    const info = await invoke('pak_info', { pak_path, ...commonArgs() });
     document.getElementById('fileList').textContent = JSON.stringify(info, null, 2);
   } catch (e) { document.getElementById('fileList').textContent = String(e); }
 }
 async function onList() {
-  const pakPath = document.getElementById('pakPath').value;
+  const pak_path = document.getElementById('pakPath').value;
+  if (!pak_path) { document.getElementById('fileList').textContent = 'Set Pak file path first.'; return; }
   try {
-    const list = await invoke('pak_list', { pakPath, stripPrefix: null, ...commonArgs() });
+    const list = await invoke('pak_list', { pak_path, strip_prefix: null, ...commonArgs() });
     document.getElementById('fileList').textContent = list.join('\n');
   } catch (e) { document.getElementById('fileList').textContent = String(e); }
 }
 async function onUnpack() {
-  const pakPath = document.getElementById('pakPath').value;
-  const outDir = pakPath.replace(/\.pak$/i, '');
+  const pak_path = document.getElementById('pakPath').value;
+  if (!pak_path) { document.getElementById('fileList').textContent = 'Set Pak file path first.'; return; }
+  const out_dir = pak_path.replace(/\.pak$/i, '');
   try {
-    const msg = await invoke('pak_unpack', { pakPath, outDir, ...commonArgs() });
+    const msg = await invoke('pak_unpack', { pak_path, out_dir, ...commonArgs() });
     document.getElementById('fileList').textContent = msg;
   } catch (e) { document.getElementById('fileList').textContent = String(e); }
 }
-// auto-load saved config
+// backend connectivity + auto-load saved config
 (async () => {
+  if (!isTauri) {
+    setStatus('Tauri backend not connected: open this UI via vrepak-gui.', false);
+    return;
+  }
   try {
     const cfg = await invoke('load_endpoint_config', {});
     if (cfg.endpoint) document.getElementById('endpoint').value = cfg.endpoint;
     if (cfg.expression) document.getElementById('expression').value = cfg.expression;
-  } catch {}
+    setStatus('Backend connected. Configure endpoint, then press Test.', null);
+  } catch (e) { setStatus('Backend error: ' + e, false); }
 })();
 </script>
 </body>
