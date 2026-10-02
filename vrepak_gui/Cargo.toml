@@ -29,3 +29,7 @@ tauri-build = "2"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# GUI ships via `tauri build`, not cargo-dist
+[package.metadata.dist]
+dist = false
