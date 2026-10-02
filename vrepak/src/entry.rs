@@ -59,6 +59,41 @@ pub(crate) struct Entry {
     pub blocks: Option<Vec<Block>>,
     pub flags: u8,
     pub compression_block_size: u32,
+    /// Wuthering Waves `CustomData` byte (encoded index entries, V11+).
+    /// Selects how many leading bytes of the entry data are AES-encrypted.
+    /// Always 0 (fully encrypted when the entry is flagged) for stock paks.
+    pub custom_data: u8,
+}
+
+/// Undo the Wuthering Waves bitfield scrambling for V11+ encoded entries
+/// (mirrors CUE4Parse `FPakEntry` handling for `GAME_WutheringWaves`).
+fn wuwa_descramble(bitfield: u32) -> u32 {
+    ((bitfield >> 16) & 0x3F)
+        | ((bitfield & 0xFFFF) << 6)
+        | ((bitfield & (1 << 28)) >> 6)
+        | ((bitfield & 0x0FC0_0000) << 1)
+        | ((bitfield & 0xC000_0000) >> 1)
+        | ((bitfield & 0x2000_0000) << 2)
+}
+
+/// Number of leading entry-data bytes that are AES-encrypted for a
+/// Wuthering Waves entry (`u64::MAX` = whole entry). Mirrors CUE4Parse
+/// `CalculateEncryptedBytesCountForWutheringWaves`.
+fn wuwa_decrypt_limit(custom_data: u8) -> Result<u64, super::Error> {
+    match custom_data {
+        0 => Ok(u64::MAX),
+        1 => Ok(0x200000),
+        2 => Ok(0x800),
+        4 => Ok(0),
+        other => Err(super::Error::Other(format!(
+            "unknown Wuthering Waves CustomData {other} for partially encrypted file"
+        ))),
+    }
+}
+
+/// Whether the Wuthering Waves encoded-entry layout applies.
+fn wuwa_entries(version: super::Version, engine: super::Engine) -> bool {
+    engine == super::Engine::WutheringWaves && version >= super::Version::V11
 }
 
 impl Entry {
@@ -148,6 +183,7 @@ impl Entry {
             blocks,
             flags,
             compression_block_size,
+            custom_data: 0,
         })
     }
 
@@ -194,8 +230,16 @@ impl Entry {
     pub fn read_encoded<R: io::Read>(
         reader: &mut R,
         version: super::Version,
+        engine: super::Engine,
     ) -> Result<Self, super::Error> {
-        let bits = reader.read_u32::<LE>()?;
+        let wuwa = wuwa_entries(version, engine);
+        let mut bits = reader.read_u32::<LE>()?;
+        let custom_data = if wuwa {
+            bits = wuwa_descramble(bits);
+            reader.read_u8()?
+        } else {
+            0
+        };
         let compression = match (bits >> 23) & 0x3f {
             0 => None,
             n => Some(n - 1),
@@ -219,14 +263,21 @@ impl Entry {
             })
         };
 
-        let offset = var_int(31)?;
-        let uncompressed = var_int(30)?;
+        let mut offset = var_int(31)?;
+        let mut uncompressed = var_int(30)?;
+        if wuwa {
+            // Kuro's modified engine stores these swapped.
+            std::mem::swap(&mut offset, &mut uncompressed);
+        }
         let compressed = match compression {
             None => uncompressed,
             _ => var_int(29)?,
         };
 
-        let offset_base = Entry::get_serialized_size(version, compression, compression_block_count);
+        // The extra CustomData byte grows the on-disk record by one.
+        let offset_base =
+            Entry::get_serialized_size(version, compression, compression_block_count)
+                + if wuwa { 1 } else { 0 };
 
         let blocks = if compression_block_count == 1 && !encrypted {
             Some(vec![Block {
@@ -265,6 +316,7 @@ impl Entry {
             blocks,
             flags: encrypted as u8,
             compression_block_size,
+            custom_data,
         })
     }
 
@@ -340,6 +392,7 @@ impl Entry {
         compression: &[Option<Compression>],
         #[allow(unused)] key: &super::Key,
         buf: &mut W,
+        engine: super::Engine,
     ) -> Result<(), super::Error> {
         reader.seek(io::SeekFrom::Start(self.offset))?;
         Entry::read(reader, version)?;
@@ -358,8 +411,18 @@ impl Entry {
                 let super::Key::Some(key) = key else {
                     return Err(super::Error::Encrypted);
                 };
+                // Wuthering Waves only encrypts a CustomData-dependent prefix
+                // of the stored data; the rest is plaintext.
+                let decrypt_len = match engine {
+                    super::Engine::WutheringWaves => {
+                        let limit = wuwa_decrypt_limit(self.custom_data)?;
+                        // limits are AES-block multiples; floor defensively.
+                        ((data.len() as u64).min(limit) & !15) as usize
+                    }
+                    super::Engine::Stock => data.len(),
+                };
                 use aes::cipher::BlockDecrypt;
-                for block in data.chunks_mut(16) {
+                for block in data[..decrypt_len].chunks_mut(16) {
                     key.decrypt_block(aes::Block::from_mut_slice(block))
                 }
                 data.truncate(self.compressed as usize);
@@ -464,5 +527,33 @@ mod test {
             .write(&mut out, super::Version::V5, super::EntryLocation::Data)
             .unwrap();
         assert_eq!(&data, &out);
+    }
+
+    #[test]
+    fn test_wuwa_descramble_is_bit_permutation() {
+        // the descramble must map every input bit to exactly one distinct
+        // output bit (i.e. be a bit permutation); otherwise the port of the
+        // CUE4Parse formula has a typo.
+        use std::collections::HashSet;
+        let mut outs = HashSet::new();
+        for i in 0..32u32 {
+            let o = super::wuwa_descramble(1 << i);
+            assert!(
+                o.is_power_of_two(),
+                "bit {i} must map to a single bit, got {o:#010x}"
+            );
+            assert!(outs.insert(o), "output collision at bit {i}");
+        }
+        assert_eq!(outs.len(), 32);
+    }
+
+    #[test]
+    fn test_wuwa_decrypt_limit() {
+        assert_eq!(super::wuwa_decrypt_limit(0).unwrap(), u64::MAX);
+        assert_eq!(super::wuwa_decrypt_limit(1).unwrap(), 0x200000);
+        assert_eq!(super::wuwa_decrypt_limit(2).unwrap(), 0x800);
+        assert_eq!(super::wuwa_decrypt_limit(4).unwrap(), 0);
+        assert!(super::wuwa_decrypt_limit(3).is_err());
+        assert!(super::wuwa_decrypt_limit(9).is_err());
     }
 }

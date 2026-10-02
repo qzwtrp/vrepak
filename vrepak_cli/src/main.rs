@@ -173,6 +173,16 @@ struct Args {
     #[arg(long, default_value = "")]
     expression: String,
 
+    /// Engine profile for game-specific pak quirks (e.g. wuthering-waves
+    /// for the modified Kuro Games engine with scrambled index entries
+    /// and partially encrypted file data).
+    #[arg(
+        long,
+        default_value_t = vrepak::Engine::Stock,
+        value_parser = clap::builder::PossibleValuesParser::new(vrepak::Engine::VARIANTS).map(|s| s.parse::<vrepak::Engine>().unwrap())
+    )]
+    engine: vrepak::Engine,
+
     #[command(subcommand)]
     action: Action,
 }
@@ -238,15 +248,15 @@ fn main() -> Result<(), vrepak::Error> {
     match args.action {
         Action::Info(action) => {
             let k = resolve_for_file(&action.input);
-            info(k, action)
+            info(k, args.engine, action)
         }
         Action::List(action) => {
             let k = resolve_for_file(&action.input);
-            list(k, action)
+            list(k, args.engine, action)
         }
         Action::HashList(action) => {
             let k = resolve_for_file(&action.input);
-            hash_list(k, action)
+            hash_list(k, args.engine, action)
         }
         Action::Unpack(action) => {
             // per-file keys for multi-input unpack
@@ -254,12 +264,12 @@ fn main() -> Result<(), vrepak::Error> {
             for input in &action.input {
                 per_file_keys.push(resolve_for_file(input));
             }
-            unpack_with_keys(per_file_keys, action)
+            unpack_with_keys(per_file_keys, args.engine, action)
         }
         Action::Pack(action) => pack(action),
         Action::Get(action) => {
             let k = resolve_for_file(&action.input);
-            get(k, action)
+            get(k, args.engine, action)
         }
         Action::EndpointTest(action) => endpoint_test(action),
     }
@@ -299,8 +309,8 @@ fn endpoint_test(action: ActionEndpointTest) -> Result<(), vrepak::Error> {
     }
 }
 
-fn info(aes_key: Option<aes::Aes256>, action: ActionInfo) -> Result<(), vrepak::Error> {
-    let mut builder = vrepak::PakBuilder::new();
+fn info(aes_key: Option<aes::Aes256>, engine: vrepak::Engine, action: ActionInfo) -> Result<(), vrepak::Error> {
+    let mut builder = vrepak::PakBuilder::new().engine(engine);
     if let Some(aes_key) = aes_key {
         builder = builder.key(aes_key);
     }
@@ -321,8 +331,8 @@ fn info(aes_key: Option<aes::Aes256>, action: ActionInfo) -> Result<(), vrepak::
     Ok(())
 }
 
-fn list(aes_key: Option<aes::Aes256>, action: ActionList) -> Result<(), vrepak::Error> {
-    let mut builder = vrepak::PakBuilder::new();
+fn list(aes_key: Option<aes::Aes256>, engine: vrepak::Engine, action: ActionList) -> Result<(), vrepak::Error> {
+    let mut builder = vrepak::PakBuilder::new().engine(engine);
     if let Some(aes_key) = aes_key {
         builder = builder.key(aes_key);
     }
@@ -354,8 +364,8 @@ fn list(aes_key: Option<aes::Aes256>, action: ActionList) -> Result<(), vrepak::
     Ok(())
 }
 
-fn hash_list(aes_key: Option<aes::Aes256>, action: ActionHashList) -> Result<(), vrepak::Error> {
-    let mut builder = vrepak::PakBuilder::new();
+fn hash_list(aes_key: Option<aes::Aes256>, engine: vrepak::Engine, action: ActionHashList) -> Result<(), vrepak::Error> {
+    let mut builder = vrepak::PakBuilder::new().engine(engine);
     if let Some(aes_key) = aes_key {
         builder = builder.key(aes_key);
     }
@@ -426,10 +436,10 @@ impl Output {
     }
 }
 
-fn unpack_with_keys(per_file_keys: Vec<Option<aes::Aes256>>, action: ActionUnpack) -> Result<(), vrepak::Error> {
+fn unpack_with_keys(per_file_keys: Vec<Option<aes::Aes256>>, engine: vrepak::Engine, action: ActionUnpack) -> Result<(), vrepak::Error> {
     for (idx, input) in action.input.iter().enumerate() {
         let aes_key = per_file_keys.get(idx).cloned().flatten();
-        let mut builder = vrepak::PakBuilder::new();
+        let mut builder = vrepak::PakBuilder::new().engine(engine);
         if let Some(aes_key) = aes_key.clone() {
             builder = builder.key(aes_key);
         }
@@ -658,9 +668,9 @@ fn pack(args: ActionPack) -> Result<(), vrepak::Error> {
     Ok(())
 }
 
-fn get(aes_key: Option<aes::Aes256>, args: ActionGet) -> Result<(), vrepak::Error> {
+fn get(aes_key: Option<aes::Aes256>, engine: vrepak::Engine, args: ActionGet) -> Result<(), vrepak::Error> {
     let mut reader = BufReader::new(File::open(&args.input)?);
-    let mut builder = vrepak::PakBuilder::new();
+    let mut builder = vrepak::PakBuilder::new().engine(engine);
     if let Some(aes_key) = aes_key {
         builder = builder.key(aes_key);
     }

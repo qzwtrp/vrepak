@@ -122,6 +122,32 @@ pub enum Compression {
     LZ4,
 }
 
+/// Engine profile selecting game-specific pak layout/decryption quirks.
+///
+/// `Stock` is plain Unreal Engine behavior. `WutheringWaves` targets the
+/// modified engine by Kuro Games: V11+ encoded index entries use a scrambled
+/// bitfield with an extra `CustomData` byte and swapped offset/size, and
+/// entry data is only AES-encrypted for a `CustomData`-dependent prefix
+/// (0: fully encrypted, 1: first 0x200000 bytes, 2: first 0x800 bytes,
+/// 4: plaintext), mirroring FModel's `GAME_WutheringWaves` handling.
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Debug,
+    Default,
+    strum::Display,
+    strum::EnumString,
+    strum::VariantNames,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum Engine {
+    #[default]
+    Stock,
+    WutheringWaves,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Default)]
 pub(crate) enum Key {

@@ -20,6 +20,7 @@ impl std::fmt::Debug for Hash {
 pub struct PakBuilder {
     key: super::Key,
     allowed_compression: Vec<Compression>,
+    engine: super::Engine,
 }
 
 impl Default for PakBuilder {
@@ -33,6 +34,7 @@ impl PakBuilder {
         Self {
             key: Default::default(),
             allowed_compression: Default::default(),
+            engine: Default::default(),
         }
     }
     #[cfg(feature = "encryption")]
@@ -45,15 +47,20 @@ impl PakBuilder {
         self.allowed_compression = compression.into_iter().collect();
         self
     }
+    /// Engine profile for game-specific pak quirks (default: stock Unreal Engine).
+    pub fn engine(mut self, engine: super::Engine) -> Self {
+        self.engine = engine;
+        self
+    }
     pub fn reader<R: Read + Seek>(self, reader: &mut R) -> Result<PakReader, super::Error> {
-        PakReader::new_any_inner(reader, self.key)
+        PakReader::new_any_inner(reader, self.key, self.engine)
     }
     pub fn reader_with_version<R: Read + Seek>(
         self,
         reader: &mut R,
         version: super::Version,
     ) -> Result<PakReader, super::Error> {
-        PakReader::new_inner(reader, version, self.key)
+        PakReader::new_inner(reader, version, self.key, self.engine)
     }
     pub fn writer<W: Write + Seek>(
         self,
@@ -77,6 +84,7 @@ impl PakBuilder {
 pub struct PakReader {
     pak: Pak,
     key: super::Key,
+    engine: super::Engine,
 }
 
 #[derive(Debug)]
@@ -164,13 +172,14 @@ impl PakReader {
     fn new_any_inner<R: Read + Seek>(
         reader: &mut R,
         key: super::Key,
+        engine: super::Engine,
     ) -> Result<Self, super::Error> {
         use std::fmt::Write;
         let mut log = "\n".to_owned();
 
         for ver in Version::iter() {
-            match Pak::read(&mut *reader, ver, &key) {
-                Ok(pak) => return Ok(Self { pak, key }),
+            match Pak::read(&mut *reader, ver, &key, engine) {
+                Ok(pak) => return Ok(Self { pak, key, engine }),
                 Err(err) => writeln!(log, "trying version {} failed: {}", ver, err)?,
             }
         }
@@ -181,8 +190,9 @@ impl PakReader {
         reader: &mut R,
         version: super::Version,
         key: super::Key,
+        engine: super::Engine,
     ) -> Result<Self, super::Error> {
-        Pak::read(reader, version, &key).map(|pak| Self { pak, key })
+        Pak::read(reader, version, &key, engine).map(|pak| Self { pak, key, engine })
     }
 
     pub fn version(&self) -> super::Version {
@@ -224,6 +234,7 @@ impl PakReader {
                 &self.pak.compression,
                 &self.key,
                 writer,
+                self.engine,
             ),
             None => Err(super::Error::MissingEntry(path.to_owned())),
         }
@@ -395,6 +406,7 @@ impl Pak {
         reader: &mut R,
         version: super::Version,
         #[allow(unused)] key: &super::Key,
+        engine: super::Engine,
     ) -> Result<Self, super::Error> {
         // read footer to get index, encryption & compression info
         reader.seek(io::SeekFrom::End(-version.size()))?;
@@ -506,7 +518,7 @@ impl Pak {
                         }
                         let entry = if *encoded_offset >= 0 {
                             encoded_entries.set_position(*encoded_offset as u64);
-                            Entry::read_encoded(&mut encoded_entries, version)?
+                            Entry::read_encoded(&mut encoded_entries, version, engine)?
                         } else {
                             let index = (-*encoded_offset) as usize - 1;
                             non_encoded_entries[index].clone()

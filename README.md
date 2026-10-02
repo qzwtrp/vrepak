@@ -34,6 +34,7 @@ Options:
   -a, --aes-key <AES_KEY>        256 bit AES encryption key as base64 or hex string if the pak is encrypted
       --endpoint <ENDPOINT>      Endpoint URL returning JSON with AES keys (FModel compatible). If set, keys are auto-resolved per-pak GUID (main key fallback)
       --expression <EXPRESSION>  JSONPath expression for endpoint, e.g. $['mainKey', 'dynamicKeys']. Supports up to 2 elements: main key + dynamic [{guid, key}] list [default: ]
+      --engine <ENGINE>          Engine profile for game-specific pak quirks (e.g. wuthering-waves for the modified Kuro Games engine with scrambled index entries and partially encrypted file data) [default: stock] [possible values: stock, wuthering-waves]
   -h, --help                     Print help
   -V, --version                  Print version
 ```
@@ -98,6 +99,23 @@ picks the matching dynamic key, falling back to the main key. An explicitly pass
 
 The GUI (`vrepak-gui`) persists the endpoint configuration to
 `%APPDATA%\vrepak\endpoint.json` on Windows or `~/.config/vrepak/endpoint.json` otherwise.
+
+### wuthering waves (modified engine)
+
+Wuthering Waves runs on a modified Unreal Engine by Kuro Games whose `.pak`
+files differ from stock UE: V11+ encoded index entries use a scrambled bitfield
+with an extra `CustomData` byte and swapped offset/size, and file data is only
+AES-encrypted for a `CustomData`-dependent prefix (like FModel's
+`GAME_WutheringWaves` handling). Select it explicitly, mirroring FModel's
+engine picker:
+
+```console
+$ vrepak --engine wuthering-waves --endpoint https://example.com/keys.json unpack MyGame.pak
+```
+
+In the GUI, pick *Wuthering Waves* in the *Engine* row of the Pak Tools tab.
+Stock UE paks keep working with the default `stock` engine. Writing WuWa
+paks is not supported (read-only).
 
 ## gui
 

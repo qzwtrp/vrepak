@@ -117,6 +117,7 @@ impl<D: AsRef<[u8]>> PartialEntry<D> {
             blocks,
             flags: 0,
             compression_block_size: self.compression_block_size,
+            custom_data: 0,
         })
     }
     pub(crate) fn write_data<S: Write>(&self, stream: &mut S) -> Result<()> {

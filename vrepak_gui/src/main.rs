@@ -124,16 +124,17 @@ fn pak_info_text(
     aes_key: Option<String>,
     endpoint: Option<String>,
     expression: Option<String>,
+    engine: vrepak::Engine,
 ) -> Result<String, String> {
     let (key, source) = resolve_key_for_pak(pak_path, aes_key, endpoint, expression)?;
-    let mut builder = vrepak::PakBuilder::new();
+    let mut builder = vrepak::PakBuilder::new().engine(engine);
     if let Some(k) = key {
         builder = builder.key(k);
     }
     let mut reader = BufReader::new(File::open(pak_path).map_err(|e| e.to_string())?);
     let pak = builder.reader(&mut reader).map_err(|e| e.to_string())?;
     Ok(format!(
-        "[key: {}]\nmount point: {}\nversion: {}\nencrypted index: {}\nencryption guid: {:032X?}\n{} file entries",
+        "[engine: {engine}]\n[key: {}]\nmount point: {}\nversion: {}\nencrypted index: {}\nencryption guid: {:032X?}\n{} file entries",
         source.describe(),
         pak.mount_point(),
         pak.version(),
@@ -148,9 +149,10 @@ fn pak_list_text(
     aes_key: Option<String>,
     endpoint: Option<String>,
     expression: Option<String>,
+    engine: vrepak::Engine,
 ) -> Result<String, String> {
     let (key, source) = resolve_key_for_pak(pak_path, aes_key, endpoint, expression)?;
-    let mut builder = vrepak::PakBuilder::new();
+    let mut builder = vrepak::PakBuilder::new().engine(engine);
     if let Some(k) = key {
         builder = builder.key(k);
     }
@@ -179,8 +181,9 @@ fn pak_unpack_with_key(
     pak_path: &str,
     out_dir: &str,
     key: Option<aes::Aes256>,
+    engine: vrepak::Engine,
 ) -> Result<String, String> {
-    let mut builder = vrepak::PakBuilder::new();
+    let mut builder = vrepak::PakBuilder::new().engine(engine);
     if let Some(k) = key {
         builder = builder.key(k);
     }
@@ -218,6 +221,7 @@ struct GuiApp {
     status: (String, StatusKind),
     pak_path: String,
     aes_key: String,
+    engine: vrepak::Engine,
     pak_output: String,
     pending: Option<Receiver<JobResult>>,
     busy: bool,
@@ -239,6 +243,7 @@ impl GuiApp {
             ),
             pak_path: String::new(),
             aes_key: String::new(),
+            engine: vrepak::Engine::Stock,
             pak_output: String::new(),
             pending: None,
             busy: false,
@@ -403,7 +408,7 @@ impl GuiApp {
         } else {
             Some(self.aes_key.clone())
         };
-        match pak_info_text(&self.pak_path, aes, ep, ex) {
+        match pak_info_text(&self.pak_path, aes, ep, ex, self.engine) {
             Ok(t) => {
                 self.pak_output = t;
                 self.set_status("Info loaded.", StatusKind::Ok);
@@ -426,7 +431,7 @@ impl GuiApp {
         } else {
             Some(self.aes_key.clone())
         };
-        match pak_list_text(&self.pak_path, aes, ep, ex) {
+        match pak_list_text(&self.pak_path, aes, ep, ex, self.engine) {
             Ok(t) => {
                 self.pak_output = t;
                 self.set_status("File list loaded.", StatusKind::Ok);
@@ -460,9 +465,10 @@ impl GuiApp {
             }
         };
         let source_str = source.describe();
+        let engine = self.engine;
         self.set_status("Unpacking…", StatusKind::Info);
         self.spawn_job(
-            move || match pak_unpack_with_key(&pak_path, &out_dir, key) {
+            move || match pak_unpack_with_key(&pak_path, &out_dir, key, engine) {
                 Ok(t) => JobResult::Pak {
                     text: t.clone(),
                     ok: true,
@@ -577,6 +583,20 @@ impl GuiApp {
             None,
         );
         ui.horizontal(|ui| {
+            ui.label("Engine");
+            ui.selectable_value(
+                &mut self.engine,
+                vrepak::Engine::Stock,
+                "Stock UE",
+            );
+            ui.selectable_value(
+                &mut self.engine,
+                vrepak::Engine::WutheringWaves,
+                "Wuthering Waves",
+            );
+            ui.label("(Kuro modded engine: descrambled index + partially encrypted data)");
+        });
+        ui.horizontal(|ui| {
             if ui.button("Info").clicked() {
                 self.on_info();
             }
@@ -615,7 +635,7 @@ impl eframe::App for GuiApp {
 
         egui::TopBottomPanel::bottom("bottom").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label("vrepak-gui 0.3.0 (native)");
+                ui.label(concat!("vrepak-gui ", env!("CARGO_PKG_VERSION"), " (native)"));
                 ui.colored_label(self.status.1.color(), &self.status.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Online Evaluator").clicked() {
