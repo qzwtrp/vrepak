@@ -1,5 +1,5 @@
 [package]
-name = "repak_cli"
+name = "vrepak_cli"
 description = "Utility for building/extracting/inspecting Unreal Engine .pak files"
 repository.workspace = true
 authors.workspace = true
@@ -14,15 +14,15 @@ license = false
 eula = false
 
 [[bin]]
-name = "repak"
+name = "vrepak"
 path = "src/main.rs"
 
 [features]
 default = ["oodle"]
-oodle = ["repak/oodle"]
+oodle = ["vrepak/oodle"]
 
 [dependencies]
-repak = { path = "../repak" }
+vrepak = { path = "../vrepak" }
 aes = { workspace = true }
 base64 = { workspace = true }
 clap = { version = "4.5.53", features = ["derive"] }

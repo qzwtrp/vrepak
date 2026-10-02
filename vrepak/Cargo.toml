@@ -1,5 +1,5 @@
 [package]
-name = "repak"
+name = "vrepak"
 repository.workspace = true
 authors.workspace = true
 license.workspace = true

@@ -90,21 +90,21 @@ mod test {
 
 static AES_KEY: &str = "lNJbw660IOC+kU7cnVQ1oeqrXyhk4J6UAZrCBbcnp94=";
 
-fn test_read(version: repak::Version, _file_name: &str, bytes: &[u8]) {
+fn test_read(version: vrepak::Version, _file_name: &str, bytes: &[u8]) {
     use aes::cipher::KeyInit;
     use base64::{engine::general_purpose, Engine as _};
     let key = general_purpose::STANDARD
         .decode(AES_KEY)
         .as_ref()
-        .map_err(|_| repak::Error::Aes)
-        .and_then(|bytes| aes::Aes256::new_from_slice(bytes).map_err(|_| repak::Error::Aes))
+        .map_err(|_| vrepak::Error::Aes)
+        .and_then(|bytes| aes::Aes256::new_from_slice(bytes).map_err(|_| vrepak::Error::Aes))
         .unwrap();
 
     let mut inner_reader = std::io::Cursor::new(bytes);
     let len = inner_reader.seek(SeekFrom::End(0)).unwrap();
     let mut reader = ReadCounter::new_size(inner_reader, len as usize);
 
-    let pak = repak::PakBuilder::new()
+    let pak = vrepak::PakBuilder::new()
         .key(key)
         .reader(&mut reader)
         .unwrap();
@@ -159,24 +159,24 @@ fn test_read(version: repak::Version, _file_name: &str, bytes: &[u8]) {
     }
 }
 
-fn test_write(_version: repak::Version, _file_name: &str, bytes: &[u8]) {
+fn test_write(_version: vrepak::Version, _file_name: &str, bytes: &[u8]) {
     use aes::cipher::KeyInit;
     use base64::{engine::general_purpose, Engine as _};
     let key = general_purpose::STANDARD
         .decode(AES_KEY)
         .as_ref()
-        .map_err(|_| repak::Error::Aes)
-        .and_then(|bytes| aes::Aes256::new_from_slice(bytes).map_err(|_| repak::Error::Aes))
+        .map_err(|_| vrepak::Error::Aes)
+        .and_then(|bytes| aes::Aes256::new_from_slice(bytes).map_err(|_| vrepak::Error::Aes))
         .unwrap();
 
     let mut reader = std::io::Cursor::new(bytes);
-    let pak_reader = repak::PakBuilder::new()
+    let pak_reader = vrepak::PakBuilder::new()
         .key(key)
         .reader(&mut reader)
         .unwrap();
 
     let writer = Cursor::new(vec![]);
-    let mut pak_writer = repak::PakBuilder::new().writer(
+    let mut pak_writer = vrepak::PakBuilder::new().writer(
         writer,
         pak_reader.version(),
         pak_reader.mount_point().to_owned(),
@@ -191,18 +191,18 @@ fn test_write(_version: repak::Version, _file_name: &str, bytes: &[u8]) {
     assert!(pak_writer.write_index().unwrap().into_inner() == reader.into_inner());
 }
 
-fn test_rewrite_index(_version: repak::Version, _file_name: &str, bytes: &[u8]) {
+fn test_rewrite_index(_version: vrepak::Version, _file_name: &str, bytes: &[u8]) {
     use aes::cipher::KeyInit;
     use base64::{engine::general_purpose, Engine as _};
     let key = general_purpose::STANDARD
         .decode(AES_KEY)
         .as_ref()
-        .map_err(|_| repak::Error::Aes)
-        .and_then(|bytes| aes::Aes256::new_from_slice(bytes).map_err(|_| repak::Error::Aes))
+        .map_err(|_| vrepak::Error::Aes)
+        .and_then(|bytes| aes::Aes256::new_from_slice(bytes).map_err(|_| vrepak::Error::Aes))
         .unwrap();
 
     let mut buf = std::io::Cursor::new(bytes.to_vec());
-    let pak_reader = repak::PakBuilder::new().key(key).reader(&mut buf).unwrap();
+    let pak_reader = vrepak::PakBuilder::new().key(key).reader(&mut buf).unwrap();
 
     let rewrite = pak_reader
         .into_pakwriter(buf)
@@ -255,12 +255,12 @@ macro_rules! matrix_test_body {
 matrix_test!(
     "read",
     (
-        "v5" repak::Version::V5,
-        "v7" repak::Version::V7,
-        "v8a" repak::Version::V8A,
-        "v8b" repak::Version::V8B,
-        "v9" repak::Version::V9,
-        "v11" repak::Version::V11,
+        "v5" vrepak::Version::V5,
+        "v7" vrepak::Version::V7,
+        "v8a" vrepak::Version::V8A,
+        "v8b" vrepak::Version::V8B,
+        "v9" vrepak::Version::V9,
+        "v11" vrepak::Version::V11,
     ),
     ("", "_compress"),
     ("", "_encrypt"),
@@ -271,12 +271,12 @@ matrix_test!(
 matrix_test!(
     "write",
     (
-        "v5" repak::Version::V5,
-        "v7" repak::Version::V7,
-        "v8a" repak::Version::V8A,
-        "v8b" repak::Version::V8B,
-        "v9" repak::Version::V9,
-        "v11" repak::Version::V11,
+        "v5" vrepak::Version::V5,
+        "v7" vrepak::Version::V7,
+        "v8a" vrepak::Version::V8A,
+        "v8b" vrepak::Version::V8B,
+        "v9" vrepak::Version::V9,
+        "v11" vrepak::Version::V11,
     ),
     ("", /*"_compress"*/),
     ("", /*"_encrypt"*/),
@@ -287,12 +287,12 @@ matrix_test!(
 matrix_test!(
     "rewrite_index",
     (
-        "v5" repak::Version::V5,
-        "v7" repak::Version::V7,
-        "v8a" repak::Version::V8A,
-        "v8b" repak::Version::V8B,
-        "v9" repak::Version::V9,
-        "v11" repak::Version::V11,
+        "v5" vrepak::Version::V5,
+        "v7" vrepak::Version::V7,
+        "v8a" vrepak::Version::V8A,
+        "v8b" vrepak::Version::V8B,
+        "v9" vrepak::Version::V9,
+        "v11" vrepak::Version::V11,
     ),
     ("", "_compress"),
     ("", "_encrypt"),
@@ -310,11 +310,11 @@ mod roundtrip {
         ("dir/nested.txt", b"nested file content"),
     ];
 
-    fn roundtrip(version: repak::Version, compression: Option<repak::Compression>) {
-        let allowed_compression: Vec<repak::Compression> = compression.into_iter().collect();
+    fn roundtrip(version: vrepak::Version, compression: Option<vrepak::Compression>) {
+        let allowed_compression: Vec<vrepak::Compression> = compression.into_iter().collect();
 
         let writer = Cursor::new(vec![]);
-        let mut builder = repak::PakBuilder::new();
+        let mut builder = vrepak::PakBuilder::new();
         if !allowed_compression.is_empty() {
             builder = builder.compression(allowed_compression);
         }
@@ -329,7 +329,7 @@ mod roundtrip {
         let buf = pak_writer.write_index().unwrap().into_inner();
 
         let mut reader = Cursor::new(&buf);
-        let pak_reader = repak::PakBuilder::new().reader(&mut reader).unwrap();
+        let pak_reader = vrepak::PakBuilder::new().reader(&mut reader).unwrap();
 
         assert_eq!(pak_reader.version(), version);
         assert_eq!(pak_reader.mount_point(), "../../../");
@@ -356,17 +356,17 @@ mod roundtrip {
                 paste::paste! {
                     #[test]
                     fn [< roundtrip_ $version:lower _none >]() {
-                        roundtrip(repak::Version::$version, None);
+                        roundtrip(vrepak::Version::$version, None);
                     }
 
                     #[test]
                     fn [< roundtrip_ $version:lower _zlib >]() {
-                        roundtrip(repak::Version::$version, Some(repak::Compression::Zlib));
+                        roundtrip(vrepak::Version::$version, Some(vrepak::Compression::Zlib));
                     }
 
                     #[test]
                     fn [< roundtrip_ $version:lower _gzip >]() {
-                        roundtrip(repak::Version::$version, Some(repak::Compression::Gzip));
+                        roundtrip(vrepak::Version::$version, Some(vrepak::Compression::Gzip));
                     }
                 }
             )+
@@ -376,27 +376,27 @@ mod roundtrip {
                 paste::paste! {
                     #[test]
                     fn [< roundtrip_ $version:lower _none >]() {
-                        roundtrip(repak::Version::$version, None);
+                        roundtrip(vrepak::Version::$version, None);
                     }
 
                     #[test]
                     fn [< roundtrip_ $version:lower _zlib >]() {
-                        roundtrip(repak::Version::$version, Some(repak::Compression::Zlib));
+                        roundtrip(vrepak::Version::$version, Some(vrepak::Compression::Zlib));
                     }
 
                     #[test]
                     fn [< roundtrip_ $version:lower _gzip >]() {
-                        roundtrip(repak::Version::$version, Some(repak::Compression::Gzip));
+                        roundtrip(vrepak::Version::$version, Some(vrepak::Compression::Gzip));
                     }
 
                     #[test]
                     fn [< roundtrip_ $version:lower _zstd >]() {
-                        roundtrip(repak::Version::$version, Some(repak::Compression::Zstd));
+                        roundtrip(vrepak::Version::$version, Some(vrepak::Compression::Zstd));
                     }
 
                     #[test]
                     fn [< roundtrip_ $version:lower _lz4 >]() {
-                        roundtrip(repak::Version::$version, Some(repak::Compression::LZ4));
+                        roundtrip(vrepak::Version::$version, Some(vrepak::Compression::LZ4));
                     }
                 }
             )+

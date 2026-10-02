@@ -14,10 +14,10 @@ fn workspace_dir() -> std::path::PathBuf {
 fn test_readme_help() {
     use assert_cmd::cargo::cargo_bin_cmd;
 
-    let err = cargo_bin_cmd!("repak").unwrap_err();
+    let err = cargo_bin_cmd!("vrepak").unwrap_err();
     let help = std::str::from_utf8(&err.as_output().unwrap().stderr).unwrap();
 
     let readme = std::fs::read_to_string(workspace_dir().join("README.md")).unwrap();
 
-    assert!(readme.contains(&format!("```console\n$ repak --help\n{help}```")));
+    assert!(readme.contains(&format!("```console\n$ vrepak --help\n{help}```")));
 }

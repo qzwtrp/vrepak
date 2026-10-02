@@ -88,17 +88,17 @@ struct ActionPack {
     /// Version
     #[arg(
         long,
-        default_value_t = repak::Version::V8B,
-        value_parser = clap::builder::PossibleValuesParser::new(repak::Version::VARIANTS).map(|s| s.parse::<repak::Version>().unwrap())
+        default_value_t = vrepak::Version::V8B,
+        value_parser = clap::builder::PossibleValuesParser::new(vrepak::Version::VARIANTS).map(|s| s.parse::<vrepak::Version>().unwrap())
     )]
-    version: repak::Version,
+    version: vrepak::Version,
 
     /// Compression
     #[arg(
         long,
-        value_parser = clap::builder::PossibleValuesParser::new(repak::Compression::VARIANTS).map(|s| s.parse::<repak::Compression>().unwrap())
+        value_parser = clap::builder::PossibleValuesParser::new(vrepak::Compression::VARIANTS).map(|s| s.parse::<vrepak::Compression>().unwrap())
     )]
-    compression: Option<repak::Compression>,
+    compression: Option<vrepak::Compression>,
 
     /// Path hash seed for >= V10
     #[arg(short, long, default_value = "0")]
@@ -145,7 +145,7 @@ enum Action {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version)]
+#[command(author, version, bin_name = "vrepak")]
 struct Args {
     /// 256 bit AES encryption key as base64 or hex string if the pak is encrypted
     #[arg(short, long)]
@@ -158,7 +158,7 @@ struct Args {
 #[derive(Debug, Clone)]
 struct AesKey(aes::Aes256);
 impl std::str::FromStr for AesKey {
-    type Err = repak::Error;
+    type Err = vrepak::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         use aes::cipher::KeyInit;
         use base64::{engine::general_purpose, Engine as _};
@@ -172,11 +172,11 @@ impl std::str::FromStr for AesKey {
                     .ok()
                     .and_then(try_parse)
             })
-            .ok_or(repak::Error::Aes)
+            .ok_or(vrepak::Error::Aes)
     }
 }
 
-fn main() -> Result<(), repak::Error> {
+fn main() -> Result<(), vrepak::Error> {
     let args = Args::parse();
     let aes_key = args.aes_key.map(|k| k.0);
 
@@ -190,8 +190,8 @@ fn main() -> Result<(), repak::Error> {
     }
 }
 
-fn info(aes_key: Option<aes::Aes256>, action: ActionInfo) -> Result<(), repak::Error> {
-    let mut builder = repak::PakBuilder::new();
+fn info(aes_key: Option<aes::Aes256>, action: ActionInfo) -> Result<(), vrepak::Error> {
+    let mut builder = vrepak::PakBuilder::new();
     if let Some(aes_key) = aes_key {
         builder = builder.key(aes_key);
     }
@@ -212,8 +212,8 @@ fn info(aes_key: Option<aes::Aes256>, action: ActionInfo) -> Result<(), repak::E
     Ok(())
 }
 
-fn list(aes_key: Option<aes::Aes256>, action: ActionList) -> Result<(), repak::Error> {
-    let mut builder = repak::PakBuilder::new();
+fn list(aes_key: Option<aes::Aes256>, action: ActionList) -> Result<(), vrepak::Error> {
+    let mut builder = vrepak::PakBuilder::new();
     if let Some(aes_key) = aes_key {
         builder = builder.key(aes_key);
     }
@@ -231,7 +231,7 @@ fn list(aes_key: Option<aes::Aes256>, action: ActionList) -> Result<(), repak::E
         .iter()
         .map(|f| {
             f.strip_prefix(prefix)
-                .map_err(|_| repak::Error::PrefixMismatch {
+                .map_err(|_| vrepak::Error::PrefixMismatch {
                     path: f.to_string_lossy().to_string(),
                     prefix: prefix.to_string_lossy().to_string(),
                 })
@@ -245,8 +245,8 @@ fn list(aes_key: Option<aes::Aes256>, action: ActionList) -> Result<(), repak::E
     Ok(())
 }
 
-fn hash_list(aes_key: Option<aes::Aes256>, action: ActionHashList) -> Result<(), repak::Error> {
-    let mut builder = repak::PakBuilder::new();
+fn hash_list(aes_key: Option<aes::Aes256>, action: ActionHashList) -> Result<(), vrepak::Error> {
+    let mut builder = vrepak::PakBuilder::new();
     if let Some(aes_key) = aes_key {
         builder = builder.key(aes_key);
     }
@@ -265,7 +265,7 @@ fn hash_list(aes_key: Option<aes::Aes256>, action: ActionHashList) -> Result<(),
         .map(|(full_path, _path)| {
             full_path
                 .strip_prefix(prefix)
-                .map_err(|_| repak::Error::PrefixMismatch {
+                .map_err(|_| vrepak::Error::PrefixMismatch {
                     path: full_path.to_string_lossy().to_string(),
                     prefix: prefix.to_string_lossy().to_string(),
                 })
@@ -276,7 +276,7 @@ fn hash_list(aes_key: Option<aes::Aes256>, action: ActionHashList) -> Result<(),
         Default::default();
     full_paths.par_iter().zip(stripped).try_for_each_init(
         || (hashes.clone(), File::open(&action.input)),
-        |(hashes, file), ((_full_path, path), stripped)| -> Result<(), repak::Error> {
+        |(hashes, file), ((_full_path, path), stripped)| -> Result<(), vrepak::Error> {
             use sha2::Digest;
 
             let mut hasher = sha2::Sha256::new();
@@ -317,9 +317,9 @@ impl Output {
     }
 }
 
-fn unpack(aes_key: Option<aes::Aes256>, action: ActionUnpack) -> Result<(), repak::Error> {
+fn unpack(aes_key: Option<aes::Aes256>, action: ActionUnpack) -> Result<(), vrepak::Error> {
     for input in &action.input {
-        let mut builder = repak::PakBuilder::new();
+        let mut builder = vrepak::PakBuilder::new();
         if let Some(aes_key) = aes_key.clone() {
             builder = builder.key(aes_key);
         }
@@ -339,7 +339,7 @@ fn unpack(aes_key: Option<aes::Aes256>, action: ActionUnpack) -> Result<(), repa
             Err(e) => Err(e),
         }?;
         if action.output.is_none() && !action.force && output.read_dir()?.next().is_some() {
-            return Err(repak::Error::OutputNotEmpty(
+            return Err(vrepak::Error::OutputNotEmpty(
                 output.to_string_lossy().to_string(),
             ));
         }
@@ -382,7 +382,7 @@ fn unpack(aes_key: Option<aes::Aes256>, action: ActionUnpack) -> Result<(), repa
                 }
                 let out_path = output
                     .join(full_path.strip_prefix(prefix).map_err(|_| {
-                        repak::Error::PrefixMismatch {
+                        vrepak::Error::PrefixMismatch {
                             path: full_path.to_string_lossy().to_string(),
                             prefix: prefix.to_string_lossy().to_string(),
                         }
@@ -390,7 +390,7 @@ fn unpack(aes_key: Option<aes::Aes256>, action: ActionUnpack) -> Result<(), repa
                     .clean();
 
                 if !out_path.starts_with(&output) {
-                    return Err(repak::Error::WriteOutsideOutput(
+                    return Err(vrepak::Error::WriteOutsideOutput(
                         out_path.to_string_lossy().to_string(),
                     ));
                 }
@@ -404,7 +404,7 @@ fn unpack(aes_key: Option<aes::Aes256>, action: ActionUnpack) -> Result<(), repa
                 }))
             })
             .filter_map(|e| e.transpose())
-            .collect::<Result<Vec<_>, repak::Error>>()?;
+            .collect::<Result<Vec<_>, vrepak::Error>>()?;
 
         let progress = (!action.quiet).then(|| {
             indicatif::ProgressBar::new(entries.len() as u64)
@@ -417,7 +417,7 @@ fn unpack(aes_key: Option<aes::Aes256>, action: ActionUnpack) -> Result<(), repa
 
         entries.par_iter().try_for_each_init(
             || (progress.clone(), File::open(input)),
-            |(progress, file), entry| -> Result<(), repak::Error> {
+            |(progress, file), entry| -> Result<(), vrepak::Error> {
                 if action.verbose {
                     log.println(format!("unpacking {}", entry.entry_path));
                 }
@@ -426,7 +426,7 @@ fn unpack(aes_key: Option<aes::Aes256>, action: ActionUnpack) -> Result<(), repa
                     &entry.entry_path,
                     &mut BufReader::new(
                         file.as_ref()
-                            .map_err(|e| repak::Error::Other(format!("error reading pak: {e}")))?,
+                            .map_err(|e| vrepak::Error::Other(format!("error reading pak: {e}")))?,
                     ),
                     &mut fs::File::create(&entry.out_path)?,
                 )?;
@@ -453,7 +453,7 @@ fn unpack(aes_key: Option<aes::Aes256>, action: ActionUnpack) -> Result<(), repa
     Ok(())
 }
 
-fn pack(args: ActionPack) -> Result<(), repak::Error> {
+fn pack(args: ActionPack) -> Result<(), vrepak::Error> {
     let output = args.output.map(PathBuf::from).unwrap_or_else(|| {
         // NOTE: don't use `with_extension` here because it will replace e.g. the `.1` in
         // `test_v1.1`.
@@ -474,7 +474,7 @@ fn pack(args: ActionPack) -> Result<(), repak::Error> {
     }
     let input_path = Path::new(&args.input);
     if !input_path.is_dir() {
-        return Err(repak::Error::InputNotADirectory(
+        return Err(vrepak::Error::InputNotADirectory(
             input_path.to_string_lossy().to_string(),
         ));
     }
@@ -482,7 +482,7 @@ fn pack(args: ActionPack) -> Result<(), repak::Error> {
     collect_files(&mut paths, input_path)?;
     paths.sort();
 
-    let mut pak = repak::PakBuilder::new()
+    let mut pak = vrepak::PakBuilder::new()
         .compression(args.compression.iter().cloned())
         .writer(
             BufWriter::new(File::create(&output)?),
@@ -508,14 +508,14 @@ fn pack(args: ActionPack) -> Result<(), repak::Error> {
 
     let mut result = None;
     let result_ref = &mut result;
-    rayon::in_place_scope(|scope| -> Result<(), repak::Error> {
+    rayon::in_place_scope(|scope| -> Result<(), vrepak::Error> {
         let (tx, rx) = std::sync::mpsc::sync_channel(0);
         let entry_builder = pak.entry_builder();
 
         scope.spawn(move |_| {
             *result_ref = Some(
                 iter.par_bridge()
-                    .try_for_each(|p| -> Result<(), repak::Error> {
+                    .try_for_each(|p| -> Result<(), vrepak::Error> {
                         let rel = &p
                             .strip_prefix(input_path)
                             .expect("file not in input directory")
@@ -548,9 +548,9 @@ fn pack(args: ActionPack) -> Result<(), repak::Error> {
     Ok(())
 }
 
-fn get(aes_key: Option<aes::Aes256>, args: ActionGet) -> Result<(), repak::Error> {
+fn get(aes_key: Option<aes::Aes256>, args: ActionGet) -> Result<(), vrepak::Error> {
     let mut reader = BufReader::new(File::open(&args.input)?);
-    let mut builder = repak::PakBuilder::new();
+    let mut builder = vrepak::PakBuilder::new();
     if let Some(aes_key) = aes_key {
         builder = builder.key(aes_key);
     }
@@ -561,7 +561,7 @@ fn get(aes_key: Option<aes::Aes256>, args: ActionGet) -> Result<(), repak::Error
     let full_path = prefix.join(args.file);
     let file = full_path
         .strip_prefix(&mount_point)
-        .map_err(|_| repak::Error::PrefixMismatch {
+        .map_err(|_| vrepak::Error::PrefixMismatch {
             path: full_path.to_string_lossy().to_string(),
             prefix: mount_point.to_string_lossy().to_string(),
         })?;

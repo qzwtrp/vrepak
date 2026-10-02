@@ -1,13 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["repak", "repak_cli"]
+members = ["vrepak", "vrepak_cli"]
 
 [workspace.package]
-repository = "https://github.com/trumank/repak"
-authors = ["spuds", "trumank"]
+repository = "https://github.com/qzwtrp/vrepak"
+description = "Unreal Engine .pak file suite in Rust (GUI, CLI, & Lib)"
+authors = ["qzwtrp"]
 license = "MIT OR Apache-2.0"
-version = "0.2.3"
-edition = "2021"
+version = "0.3.0"
+edition = "2024"
 keywords = ["unreal-engine", "pak", "unrealpak"]
 
 [workspace.dependencies]
