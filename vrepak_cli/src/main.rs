@@ -142,6 +142,18 @@ enum Action {
     Pack(ActionPack),
     /// Reads a single file to stdout
     Get(ActionGet),
+    /// Test endpoint configuration (AES) - FModel compatible
+    EndpointTest(ActionEndpointTest),
+}
+
+#[derive(Parser, Debug)]
+struct ActionEndpointTest {
+    /// Endpoint URL returning JSON with keys
+    #[arg(long)]
+    endpoint: String,
+    /// JSONPath expression, e.g. $['mainKey', 'dynamicKeys']
+    #[arg(long, default_value = "")]
+    expression: String,
 }
 
 #[derive(Parser, Debug)]
@@ -150,6 +162,16 @@ struct Args {
     /// 256 bit AES encryption key as base64 or hex string if the pak is encrypted
     #[arg(short, long)]
     aes_key: Option<AesKey>,
+
+    /// Endpoint URL returning JSON with AES keys (FModel compatible).
+    /// If set, keys are auto-resolved per-pak GUID (main key fallback).
+    #[arg(long)]
+    endpoint: Option<String>,
+
+    /// JSONPath expression for endpoint, e.g. $['mainKey', 'dynamicKeys'].
+    /// Supports up to 2 elements: main key + dynamic [{guid, key}] list.
+    #[arg(long, default_value = "")]
+    expression: String,
 
     #[command(subcommand)]
     action: Action,
@@ -178,15 +200,102 @@ impl std::str::FromStr for AesKey {
 
 fn main() -> Result<(), vrepak::Error> {
     let args = Args::parse();
-    let aes_key = args.aes_key.map(|k| k.0);
+    let explicit_key = args.aes_key.map(|k| k.0);
+
+    // Endpoint cache: fetch once per invocation if needed
+    let endpoint_cache: Option<EndpointCache> = match (&explicit_key, &args.endpoint) {
+        (None, Some(endpoint)) => {
+            let cfg = vrepak_endpoint::EndpointConfig::new(endpoint.clone(), args.expression.clone());
+            match vrepak_endpoint::fetch_and_resolve(&cfg) {
+                Ok((_json, resolved)) => Some(EndpointCache { resolved }),
+                Err(e) => {
+                    eprintln!("endpoint error: {e}");
+                    eprintln!("hint: use `vrepak endpoint-test --endpoint <URL> --expression <EXPR>` to debug");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => None,
+    };
+
+    // helper: resolve key for a pak file (explicit > endpoint-by-guid > none)
+    let resolve_for_file = |pak_path: &str| -> Option<aes::Aes256> {
+        if let Some(k) = explicit_key.clone() {
+            return Some(k);
+        }
+        if let Some(cache) = &endpoint_cache {
+            // peek guid without key
+            let guid = File::open(pak_path)
+                .ok()
+                .and_then(|mut f| vrepak::PakReader::peek_encryption_guid(&mut BufReader::new(&mut f)));
+            let bytes = cache.resolved.key_for_guid(guid);
+            use aes::cipher::KeyInit;
+            return aes::Aes256::new_from_slice(&bytes).ok();
+        }
+        None
+    };
 
     match args.action {
-        Action::Info(action) => info(aes_key, action),
-        Action::List(action) => list(aes_key, action),
-        Action::HashList(action) => hash_list(aes_key, action),
-        Action::Unpack(action) => unpack(aes_key, action),
+        Action::Info(action) => {
+            let k = resolve_for_file(&action.input);
+            info(k, action)
+        }
+        Action::List(action) => {
+            let k = resolve_for_file(&action.input);
+            list(k, action)
+        }
+        Action::HashList(action) => {
+            let k = resolve_for_file(&action.input);
+            hash_list(k, action)
+        }
+        Action::Unpack(action) => {
+            // per-file keys for multi-input unpack
+            let mut per_file_keys: Vec<Option<aes::Aes256>> = Vec::new();
+            for input in &action.input {
+                per_file_keys.push(resolve_for_file(input));
+            }
+            unpack_with_keys(per_file_keys, action)
+        }
         Action::Pack(action) => pack(action),
-        Action::Get(action) => get(aes_key, action),
+        Action::Get(action) => {
+            let k = resolve_for_file(&action.input);
+            get(k, action)
+        }
+        Action::EndpointTest(action) => endpoint_test(action),
+    }
+}
+
+#[derive(Debug)]
+struct EndpointCache {
+    resolved: vrepak_endpoint::ResolvedKeys,
+}
+
+fn endpoint_test(action: ActionEndpointTest) -> Result<(), vrepak::Error> {
+    let cfg = vrepak_endpoint::EndpointConfig::new(&action.endpoint, &action.expression);
+    println!("endpoint: {}", cfg.endpoint);
+    println!("expression: {}", cfg.expression);
+    match vrepak_endpoint::fetch_and_resolve(&cfg) {
+        Ok((_json, resolved)) => {
+            println!("Your endpoint configuration is valid! Please, avoid any unnecessary modifications!");
+            println!("main key: {}", resolved.main_key_str);
+            println!("dynamic keys: {}", resolved.dynamic_keys.len());
+            for d in resolved.dynamic_keys.iter().take(10) {
+                if let Some(name) = &d.name {
+                    println!("  {} => {} ({})", d.guid_str, d.key_str, name);
+                } else {
+                    println!("  {} => {}", d.guid_str, d.key_str);
+                }
+            }
+            if resolved.dynamic_keys.len() > 10 {
+                println!("  ... and {} more", resolved.dynamic_keys.len() - 10);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Your endpoint configuration is NOT valid: {e}");
+            eprintln!("Instruction: expression must return 1-2 elements: main AES key (hex, 256-bit) and optional dynamic list [{{guid, key}}]. Example: $['mainKey', 'dynamicKeys']");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -317,8 +426,9 @@ impl Output {
     }
 }
 
-fn unpack(aes_key: Option<aes::Aes256>, action: ActionUnpack) -> Result<(), vrepak::Error> {
-    for input in &action.input {
+fn unpack_with_keys(per_file_keys: Vec<Option<aes::Aes256>>, action: ActionUnpack) -> Result<(), vrepak::Error> {
+    for (idx, input) in action.input.iter().enumerate() {
+        let aes_key = per_file_keys.get(idx).cloned().flatten();
         let mut builder = vrepak::PakBuilder::new();
         if let Some(aes_key) = aes_key.clone() {
             builder = builder.key(aes_key);

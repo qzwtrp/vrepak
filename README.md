@@ -13,6 +13,7 @@ Library and CLI tool for working with Unreal Engine .pak files.
  - Sane handling of mount points: defaults to `../../../` but can be configured via flag
  - 2x faster unpacking over `UnrealPak`
  - Unpacking is guarded against malicious pak that attempt to write to parent directories
+ - FModel-compatible AES endpoint configuration: fetch main + dynamic (per-GUID) keys from a JSON endpoint
 
 ## cli
 ```console
@@ -20,18 +21,21 @@ $ vrepak --help
 Usage: vrepak [OPTIONS] <COMMAND>
 
 Commands:
-  info       Print .pak info
-  list       List .pak files
-  hash-list  List .pak files and the SHA256 of their contents. Useful for finding differences between paks
-  unpack     Unpack .pak file
-  pack       Pack directory into .pak file
-  get        Reads a single file to stdout
-  help       Print this message or the help of the given subcommand(s)
+  info           Print .pak info
+  list           List .pak files
+  hash-list      List .pak files and the SHA256 of their contents. Useful for finding differences between paks
+  unpack         Unpack .pak file
+  pack           Pack directory into .pak file
+  get            Reads a single file to stdout
+  endpoint-test  Test endpoint configuration (AES) - FModel compatible
+  help           Print this message or the help of the given subcommand(s)
 
 Options:
-  -a, --aes-key <AES_KEY>  256 bit AES encryption key as base64 or hex string if the pak is encrypted
-  -h, --help               Print help
-  -V, --version            Print version
+  -a, --aes-key <AES_KEY>        256 bit AES encryption key as base64 or hex string if the pak is encrypted
+      --endpoint <ENDPOINT>      Endpoint URL returning JSON with AES keys (FModel compatible). If set, keys are auto-resolved per-pak GUID (main key fallback)
+      --expression <EXPRESSION>  JSONPath expression for endpoint, e.g. $['mainKey', 'dynamicKeys']. Supports up to 2 elements: main key + dynamic [{guid, key}] list [default: ]
+  -h, --help                     Print help
+  -V, --version                  Print version
 ```
 
 ### packing
@@ -57,6 +61,43 @@ assets/AssetA.uexp
 $ vrepak --aes-key 0x12345678 unpack MyEncryptedGame.pak
 Unpacked 12345 files to MyEncryptedGame from MyEncryptedGame.pak
 ```
+
+### endpoint configuration (AES)
+
+Instead of passing `--aes-key` manually, `vrepak` can fetch keys from a JSON endpoint,
+using the same concept as FModel's *Endpoint Configuration (AES)*.
+The endpoint must return JSON, and a JSONPath expression selects the key(s) from it.
+
+The expression supports up to 2 elements:
+- element 1 (mandatory): the main AES key — hex string with optional `0x` prefix (base64 also accepted);
+- element 2 (optional): list of dynamic keys, each an object with at least `guid` and `key`
+  (plus optional `name`):
+```json
+[
+    {
+        "guid": "00000000000000000000000000000000",
+        "key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "name": "pakchunk0-WindowsClient.pak"
+    }
+]
+```
+
+```console
+$ vrepak endpoint-test --endpoint https://example.com/keys.json --expression "$['mainKey', 'dynamicKeys']"
+Your endpoint configuration is valid! Please, avoid any unnecessary modifications!
+main key: 0x...
+dynamic keys: 512
+
+$ vrepak --endpoint https://example.com/keys.json --expression "$['mainKey', 'dynamicKeys']" info MyGame.pak
+$ vrepak --endpoint https://example.com/keys.json --expression "$['mainKey', 'dynamicKeys']" unpack MyGame.pak
+```
+
+For each `.pak`, `vrepak` peeks its encryption GUID from the (unencrypted) footer and
+picks the matching dynamic key, falling back to the main key. An explicitly passed
+`--aes-key` always wins over the endpoint.
+
+The GUI (`vrepak-gui`) persists the endpoint configuration to
+`%APPDATA%\vrepak\endpoint.json` on Windows or `~/.config/vrepak/endpoint.json` otherwise.
 
 ## compatibility
 

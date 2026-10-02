@@ -233,6 +233,24 @@ impl PakReader {
         self.pak.index.entries().keys().cloned().collect()
     }
 
+    /// Peek encryption GUID without needing the AES key (footer is not encrypted).
+    /// Tries all known versions, returns GUID if footer found.
+    pub fn peek_encryption_guid<R: Read + Seek>(reader: &mut R) -> Option<u128> {
+        for ver in super::Version::iter() {
+            let size = ver.size();
+            if reader.seek(io::SeekFrom::End(-size)).is_err() {
+                continue;
+            }
+            if let Ok(footer) = super::footer::Footer::read(reader, ver) {
+                // found a valid footer for this version; return its guid (may be None)
+                // if guid is None, continue searching other versions? return None directly
+                // to signal "found but no guid". We return the first valid footer's guid.
+                return footer.encryption_uuid;
+            }
+        }
+        None
+    }
+
     pub fn used_compression(&self) -> Vec<Compression> {
         let mut used_compression = vec![0; self.pak.compression.len()];
         for entry in self.pak.index.entries.values() {

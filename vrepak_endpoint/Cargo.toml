@@ -1,0 +1,18 @@
+[package]
+name = "vrepak_endpoint"
+repository.workspace = true
+authors.workspace = true
+license.workspace = true
+version.workspace = true
+edition.workspace = true
+keywords.workspace = true
+description = "Endpoint configuration (AES) for vrepak - FModel compatible"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+thiserror = "2.0"
+hex = { workspace = true }
+base64 = { workspace = true }
+jsonpath_lib = "0.3"
