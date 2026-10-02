@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Endpoint Configuration (AES) - vrepak GUI</title>
+<style>
+  :root { --bg:#1e1f2a; --panel:#262836; --border:#343748; --accent:#2f80ed; --text:#e6e6eb; --muted:#9aa0b4; }
+  * { box-sizing:border-box; font-family: Segoe UI, Inter, sans-serif; }
+  body { margin:0; background:var(--bg); color:var(--text); display:flex; flex-direction:column; height:100vh; }
+  header { display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--border); }
+  header b { font-weight:600; }
+  header button { background:transparent; border:none; color:var(--text); font-size:18px; cursor:pointer; }
+  .tabs { display:flex; gap:6px; padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--border); }
+  .tabs button { background:#2e3145; color:var(--text); border:1px solid var(--border); padding:6px 12px; cursor:pointer; border-radius:4px; }
+  .tabs button.active { background:var(--accent); border-color:var(--accent); }
+  main { flex:1; display:flex; min-height:0; }
+  .col { flex:1; padding:10px 12px; display:flex; flex-direction:column; min-width:0; }
+  .col + .col { border-left:1px solid var(--border); }
+  .row { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
+  label { font-size:13px; color:var(--muted); white-space:nowrap; }
+  input[type=text] { flex:1; background:#2e3145; border:1px solid var(--border); color:var(--text); padding:6px 8px; border-radius:4px; }
+  button.primary { background:var(--accent); border:1px solid var(--accent); color:white; padding:6px 14px; border-radius:3px; cursor:pointer; }
+  button.ghost { background:transparent; border:1px solid var(--border); color:var(--text); padding:6px 12px; border-radius:3px; cursor:pointer; }
+  pre.json { flex:1; background:#1a1b26; border:1px solid var(--border); border-radius:4px; padding:10px; overflow:auto; font-family:Consolas, monospace; font-size:12px; white-space:pre-wrap; }
+  .instruction h2 { text-align:center; margin:4px 0 8px; }
+  .instruction p, .instruction code { font-size:13px; line-height:1.5; }
+  .instruction code { background:#2e3145; padding:1px 4px; border-radius:3px; }
+  footer { display:flex; gap:8px; align-items:center; justify-content:flex-end; padding:8px 12px; background:var(--panel); border-top:1px solid var(--border); }
+  #status { flex:1; text-align:center; font-size:13px; font-weight:600; }
+  #status.ok { color:#7ee787; } #status.err { color:#ff7b72; }
+  .pak-row { display:flex; gap:8px; margin-bottom:8px; }
+  #fileList { flex:1; overflow:auto; background:#1a1b26; border:1px solid var(--border); border-radius:4px; padding:8px; font-family:Consolas, monospace; font-size:12px; }
+</style>
+</head>
+<body>
+<header><b>Endpoint Configuration (AES)</b><button onclick="window.close()">✕</button></header>
+<div class="tabs">
+  <button id="tabEndpoint" class="active" onclick="showTab('endpoint')">Endpoint (AES)</button>
+  <button id="tabPak" onclick="showTab('pak')">Pak Tools</button>
+</div>
+
+<main id="viewEndpoint">
+  <div class="col">
+    <div class="row"><label>Endpoint</label><input id="endpoint" type="text" value="" placeholder="https://..." /><button class="primary" onclick="onSend()">Send</button></div>
+    <pre class="json" id="jsonView">1</pre>
+  </div>
+  <div class="col instruction">
+    <h2>Instruction</h2>
+    <p>In order to make this work you first need to understand JSON and its query language. If you don't, please close this window. If your game never changes its AES keys or is not even encrypted, please close this window. If you do understand what you are doing, you have to know that the AES expression supports up to 2 elements.</p>
+    <p>The first element is mandatory and will be assigned to the main AES key. It has to be looking like a key, else your configuration will not be valid (the key validity against your files will not be checked). Said key must be hexadecimal and can start without "0x".</p>
+    <p>If your game uses several AES keys, you can specify a second element that will be your list of dynamic keys. The format needed is a list of objects with, at least, the next 2 variables:<br/>
+    {<br/>&nbsp;&nbsp;"guid": "the archive guid",<br/>&nbsp;&nbsp;"key": "the archive aes key"<br/>}</p>
+    <div class="row"><label>Expression</label><input id="expression" type="text" value="" placeholder="$['mainKey', 'dynamicKeys']" /><button class="primary" onclick="onTest()">Test</button></div>
+    <pre class="json" id="exprResult">1</pre>
+  </div>
+</main>
+
+<main id="viewPak" style="display:none">
+  <div class="col">
+    <div class="pak-row"><label>Pak file</label><input id="pakPath" type="text" placeholder="C:\games\pakchunk0.pak" /><button class="ghost" onclick="browsePak()">…</button></div>
+    <div class="pak-row"><label>AES key (optional if endpoint set)</label><input id="aesKey" type="text" placeholder="0x..." /></div>
+    <div class="pak-row">
+      <button class="primary" onclick="onInfo()">Info</button>
+      <button class="primary" onclick="onList()">List</button>
+      <button class="primary" onclick="onUnpack()">Unpack</button>
+    </div>
+    <div id="fileList">Pak output…</div>
+  </div>
+</main>
+
+<footer>
+  <span id="status">Configure endpoint, then press Test.</span>
+  <button class="ghost" onclick="onOk()">OK</button>
+  <button class="ghost" onclick="window.open('https://github.com/4sval/FModel/wiki/Settings-Explanation#endpoint-configuration','_blank')">Expression Syntax</button>
+  <button class="ghost" onclick="window.open('https://jsonpath.com/','_blank')">Online Evaluator</button>
+</footer>
+
+<script>
+const isTauri = !!window.__TAURI_INTERNALS__;
+function setStatus(msg, ok) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = ok === true ? 'ok' : ok === false ? 'err' : '';
+}
+function showTab(name) {
+  document.getElementById('viewEndpoint').style.display = name === 'endpoint' ? 'flex' : 'none';
+  document.getElementById('viewPak').style.display = name === 'pak' ? 'flex' : 'none';
+  document.getElementById('tabEndpoint').className = name === 'endpoint' ? 'active' : '';
+  document.getElementById('tabPak').className = name === 'pak' ? 'active' : '';
+}
+async function invoke(cmd, args) {
+  if (isTauri) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return invoke(cmd, args);
+  } else {
+    throw new Error('Tauri backend not available (run via vrepak-gui). Frontend still works for preview.');
+  }
+}
+async function onSend() {
+  const endpoint = document.getElementById('endpoint').value;
+  setStatus('Fetching endpoint…');
+  try {
+    const json = await invoke('fetch_endpoint', { endpoint });
+    document.getElementById('jsonView').textContent = JSON.stringify(json, null, 2).slice(0, 20000);
+    setStatus('Endpoint fetched. Now press Test.', null);
+  } catch (e) {
+    document.getElementById('jsonView').textContent = String(e);
+    setStatus('Fetch failed: ' + e, false);
+  }
+}
+async function onTest() {
+  const endpoint = document.getElementById('endpoint').value;
+  const expression = document.getElementById('expression').value;
+  setStatus('Testing expression…');
+  try {
+    const r = await invoke('test_expression', { endpoint, expression });
+    document.getElementById('exprResult').textContent = JSON.stringify(r, null, 2);
+    if (r.valid) setStatus(r.message, true);
+    else setStatus(r.message, false);
+  } catch (e) { setStatus('Test failed: ' + e, false); }
+}
+async function onOk() {
+  const endpoint = document.getElementById('endpoint').value;
+  const expression = document.getElementById('expression').value;
+  try {
+    const path = await invoke('save_endpoint_config', { endpoint, expression });
+    setStatus('Saved to ' + path, true);
+  } catch (e) { setStatus('Save failed: ' + e, false); }
+}
+async function browsePak() {
+  try {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const f = await open({ filters: [{ name: 'Pak', extensions: ['pak'] }] });
+    if (f) document.getElementById('pakPath').value = f;
+  } catch (e) { setStatus(String(e), false); }
+}
+function commonArgs() {
+  return {
+    aesKey: document.getElementById('aesKey').value || null,
+    endpoint: document.getElementById('endpoint').value || null,
+    expression: document.getElementById('expression').value || null,
+  };
+}
+async function onInfo() {
+  const pakPath = document.getElementById('pakPath').value;
+  try {
+    const info = await invoke('pak_info', { pakPath, ...commonArgs() });
+    document.getElementById('fileList').textContent = JSON.stringify(info, null, 2);
+  } catch (e) { document.getElementById('fileList').textContent = String(e); }
+}
+async function onList() {
+  const pakPath = document.getElementById('pakPath').value;
+  try {
+    const list = await invoke('pak_list', { pakPath, stripPrefix: null, ...commonArgs() });
+    document.getElementById('fileList').textContent = list.join('\n');
+  } catch (e) { document.getElementById('fileList').textContent = String(e); }
+}
+async function onUnpack() {
+  const pakPath = document.getElementById('pakPath').value;
+  const outDir = pakPath.replace(/\.pak$/i, '');
+  try {
+    const msg = await invoke('pak_unpack', { pakPath, outDir, ...commonArgs() });
+    document.getElementById('fileList').textContent = msg;
+  } catch (e) { document.getElementById('fileList').textContent = String(e); }
+}
+// auto-load saved config
+(async () => {
+  try {
+    const cfg = await invoke('load_endpoint_config', {});
+    if (cfg.endpoint) document.getElementById('endpoint').value = cfg.endpoint;
+    if (cfg.expression) document.getElementById('expression').value = cfg.expression;
+  } catch {}
+})();
+</script>
+</body>
+</html>

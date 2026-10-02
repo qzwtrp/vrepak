@@ -99,6 +99,26 @@ picks the matching dynamic key, falling back to the main key. An explicitly pass
 The GUI (`vrepak-gui`) persists the endpoint configuration to
 `%APPDATA%\vrepak\endpoint.json` on Windows or `~/.config/vrepak/endpoint.json` otherwise.
 
+## gui
+
+`vrepak-gui` is a Tauri GUI wrapper around the `vrepak` library with an
+*Endpoint Configuration (AES)* dialog (FModel-style: Endpoint + Send, instruction,
+Expression + Test, validity status bar) plus basic pak tools (`info` / `list` / `unpack`).
+
+```console
+$ cargo run -p vrepak_gui
+```
+
+## workspace
+
+| Crate | Description |
+|-------|-------------|
+| `vrepak` | Core library: reading/writing `.pak` (fork of [`repak`](https://github.com/trumank/repak)) |
+| `vrepak_cli` | `vrepak` binary: `info` / `list` / `hash-list` / `unpack` / `pack` / `get` / `endpoint-test` |
+| `vrepak_endpoint` | Endpoint configuration (AES): fetch JSON + JSONPath evaluation + key validation (FModel compatible) |
+| `vrepak_gui` | `vrepak-gui` binary: Tauri GUI wrapper |
+| `oodle_loader` | Optional Oodle loader (unchanged from upstream) |
+
 ## compatibility
 
 | UE Version   | Version | Version Feature       | Read               | Write                  |
@@ -147,3 +167,4 @@ As far as I can tell, the index is not necessarily written deterministically by 
 - [unpak](https://github.com/bananaturtlesandwich/unpak): original crate featuring read-only pak operations
 - [rust-u4pak](https://github.com/panzi/rust-u4pak)'s README detailing the pak file layout
 - [jieyouxu](https://github.com/jieyouxu) for serialization implementation of the significantly more complex V11 index
+- [FModel](https://github.com/4sval/FModel): inspiration for the endpoint configuration (AES) concept

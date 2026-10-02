@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["vrepak", "vrepak_cli", "vrepak_endpoint"]
+members = ["vrepak", "vrepak_cli", "vrepak_endpoint", "vrepak_gui"]
 
 [workspace.package]
 repository = "https://github.com/qzwtrp/vrepak"

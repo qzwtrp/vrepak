@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "vrepak GUI",
+  "version": "0.3.0",
+  "identifier": "com.vrepak.gui",
+  "build": {
+    "frontendDist": "ui",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Endpoint Configuration (AES) - vrepak GUI",
+        "width": 1100,
+        "height": 700,
+        "theme": "Dark"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": "all",
+    "icon": []
+  }
+}
