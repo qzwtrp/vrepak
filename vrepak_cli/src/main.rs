@@ -104,6 +104,16 @@ struct ActionPack {
     #[arg(short, long, default_value = "0")]
     path_hash_seed: u64,
 
+    /// Encryption GUID recorded in the footer (32 hex chars, default zeros).
+    /// Only used when packing with a key (--aes-key/--endpoint).
+    #[arg(long, default_value = "00000000000000000000000000000000")]
+    encryption_guid: String,
+
+    /// CustomData byte for fresh entries when packing with
+    /// --engine wuthering-waves (0: full, 1: 0x200000, 2: 0x800, 4: plaintext).
+    #[arg(long, default_value = "2")]
+    wuwa_custom_data: u8,
+
     /// Verbose
     #[arg(short, long, default_value = "false")]
     verbose: bool,
@@ -266,7 +276,13 @@ fn main() -> Result<(), vrepak::Error> {
             }
             unpack_with_keys(per_file_keys, args.engine, action)
         }
-        Action::Pack(action) => pack(action),
+        Action::Pack(action) => pack(
+            explicit_key.clone(),
+            args.endpoint.clone(),
+            args.expression.clone(),
+            args.engine,
+            action,
+        ),
         Action::Get(action) => {
             let k = resolve_for_file(&action.input);
             get(k, args.engine, action)
@@ -573,12 +589,40 @@ fn unpack_with_keys(per_file_keys: Vec<Option<aes::Aes256>>, engine: vrepak::Eng
     Ok(())
 }
 
-fn pack(args: ActionPack) -> Result<(), vrepak::Error> {
+fn pack(
+    aes_key: Option<aes::Aes256>,
+    endpoint: Option<String>,
+    expression: String,
+    engine: vrepak::Engine,
+    args: ActionPack,
+) -> Result<(), vrepak::Error> {
     let output = args.output.map(PathBuf::from).unwrap_or_else(|| {
         // NOTE: don't use `with_extension` here because it will replace e.g. the `.1` in
         // `test_v1.1`.
         PathBuf::from(format!("{}.pak", args.input))
     });
+
+    // key for encryption: explicit flag wins, otherwise the endpoint's main key
+    let aes_key = match aes_key {
+        Some(k) => Some(k),
+        None => match endpoint {
+            Some(ep) if !ep.trim().is_empty() => {
+                let cfg = vrepak_endpoint::EndpointConfig::new(&ep, &expression);
+                let (_json, resolved) =
+                    vrepak_endpoint::fetch_and_resolve(&cfg).map_err(|e| {
+                        vrepak::Error::Other(format!("endpoint error: {e}"))
+                    })?;
+                use aes::cipher::KeyInit;
+                Some(
+                    aes::Aes256::new_from_slice(&resolved.key_for_guid(None))
+                        .expect("endpoint key is 32 bytes"),
+                )
+            }
+            _ => None,
+        },
+    };
+    let (guid, _) = vrepak_endpoint::parse_guid(&args.encryption_guid)
+        .map_err(|e| vrepak::Error::Other(format!("bad --encryption-guid: {e}")))?;
 
     fn collect_files(paths: &mut Vec<PathBuf>, dir: &Path) -> io::Result<()> {
         for entry in fs::read_dir(dir)? {
@@ -602,14 +646,25 @@ fn pack(args: ActionPack) -> Result<(), vrepak::Error> {
     collect_files(&mut paths, input_path)?;
     paths.sort();
 
-    let mut pak = vrepak::PakBuilder::new()
+    let encrypting = aes_key.is_some();
+    let mut builder = vrepak::PakBuilder::new()
         .compression(args.compression.iter().cloned())
-        .writer(
-            BufWriter::new(File::create(&output)?),
-            args.version,
-            args.mount_point,
-            Some(args.path_hash_seed),
-        );
+        .engine(engine)
+        .wuwa_custom_data(args.wuwa_custom_data);
+    if let Some(k) = aes_key {
+        builder = builder.key(k);
+    }
+    // record a guid only on encrypted paks (an unencrypted pak with a guid
+    // would mislead readers into requesting a key)
+    if encrypting && guid != 0 {
+        builder = builder.encryption_guid(guid);
+    }
+    let mut pak = builder.writer(
+        BufWriter::new(File::create(&output)?),
+        args.version,
+        args.mount_point,
+        Some(args.path_hash_seed),
+    );
 
     use indicatif::ProgressIterator;
 
@@ -662,7 +717,15 @@ fn pack(args: ActionPack) -> Result<(), vrepak::Error> {
     pak.write_index()?;
 
     if !args.quiet {
-        println!("Packed {} files to {}", paths.len(), output.display());
+        if encrypting {
+            println!(
+                "Packed {} files to {} (encrypted, engine {engine})",
+                paths.len(),
+                output.display()
+            );
+        } else {
+            println!("Packed {} files to {}", paths.len(), output.display());
+        }
     }
 
     Ok(())

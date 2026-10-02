@@ -21,6 +21,8 @@ pub struct PakBuilder {
     key: super::Key,
     allowed_compression: Vec<Compression>,
     engine: super::Engine,
+    encryption_guid: Option<u128>,
+    wuwa_custom_data: u8,
 }
 
 impl Default for PakBuilder {
@@ -35,6 +37,9 @@ impl PakBuilder {
             key: Default::default(),
             allowed_compression: Default::default(),
             engine: Default::default(),
+            encryption_guid: None,
+            // most Wuthering Waves entries use CustomData 2 (first 0x800 bytes encrypted)
+            wuwa_custom_data: 2,
         }
     }
     #[cfg(feature = "encryption")]
@@ -50,6 +55,19 @@ impl PakBuilder {
     /// Engine profile for game-specific pak quirks (default: stock Unreal Engine).
     pub fn engine(mut self, engine: super::Engine) -> Self {
         self.engine = engine;
+        self
+    }
+    /// Encryption GUID recorded in the footer when packing encrypted paks
+    /// (default: none, i.e. zeros — like Wuthering Waves paks).
+    pub fn encryption_guid(mut self, guid: u128) -> Self {
+        self.encryption_guid = Some(guid);
+        self
+    }
+    /// `CustomData` byte assigned to fresh entries when packing with the
+    /// Wuthering Waves engine (default: 2 = first 0x800 bytes encrypted).
+    /// Ignored for stock engine paks.
+    pub fn wuwa_custom_data(mut self, custom_data: u8) -> Self {
+        self.wuwa_custom_data = custom_data;
         self
     }
     pub fn reader<R: Read + Seek>(self, reader: &mut R) -> Result<PakReader, super::Error> {
@@ -76,6 +94,9 @@ impl PakBuilder {
             mount_point,
             path_hash_seed,
             self.allowed_compression,
+            self.engine,
+            self.encryption_guid,
+            self.wuwa_custom_data,
         )
     }
 }
@@ -93,6 +114,9 @@ pub struct PakWriter<W: Write + Seek> {
     writer: W,
     key: super::Key,
     allowed_compression: Vec<Compression>,
+    engine: super::Engine,
+    encryption_guid: Option<u128>,
+    wuwa_custom_data: u8,
 }
 
 #[derive(Debug)]
@@ -168,6 +192,22 @@ fn decrypt(key: &super::Key, bytes: &mut [u8]) -> Result<(), super::Error> {
     }
 }
 
+#[cfg(feature = "encryption")]
+fn encrypt_store(buf: &mut Vec<u8>, key: &super::Key) -> Result<(), super::Error> {
+    use aes::cipher::BlockEncrypt;
+    // stored length must stay an AES-block multiple: the reader consumes
+    // exactly `align(size)` bytes.
+    while buf.len() % 16 != 0 {
+        buf.push(0);
+    }
+    let super::Key::Some(key) = key else {
+        return Err(super::Error::Encrypted);
+    };
+    for block in buf.chunks_mut(16) {
+        key.encrypt_block(aes::Block::from_mut_slice(block))
+    }
+    Ok(())
+}
 impl PakReader {
     fn new_any_inner<R: Read + Seek>(
         reader: &mut R,
@@ -284,11 +324,17 @@ impl PakReader {
         mut writer: W,
     ) -> Result<PakWriter<W>, super::Error> {
         writer.seek(io::SeekFrom::Start(self.pak.index_offset.unwrap()))?;
+        let encryption_guid = self.pak.encryption_guid;
         Ok(PakWriter {
             allowed_compression: self.pak.compression.iter().filter_map(|c| *c).collect(),
             pak: self.pak,
             key: self.key,
             writer,
+            engine: self.engine,
+            // rewriting preserves the source pak's guid; fresh entries keep
+            // whatever CustomData they were read with (writer default unused)
+            encryption_guid,
+            wuwa_custom_data: 2,
         })
     }
 }
@@ -301,17 +347,57 @@ impl<W: Write + Seek> PakWriter<W> {
         mount_point: String,
         path_hash_seed: Option<u64>,
         allowed_compression: Vec<Compression>,
+        engine: super::Engine,
+        encryption_guid: Option<u128>,
+        wuwa_custom_data: u8,
     ) -> Self {
         PakWriter {
             pak: Pak::new(version, mount_point, path_hash_seed),
             writer,
             key,
             allowed_compression,
+            engine,
+            encryption_guid,
+            wuwa_custom_data,
         }
     }
 
     pub fn into_writer(self) -> W {
         self.writer
+    }
+
+    /// Encryption parameters for the next written entry, if a key is set.
+    /// Takes individual fields (not `&self`) so the result can be used
+    /// alongside `&mut` borrows of the writer.
+    fn crypt(
+        key: &super::Key,
+        engine: super::Engine,
+        wuwa_custom_data: u8,
+    ) -> Result<Option<crate::entry::WriteCrypt<'_>>, super::Error> {
+        #[cfg(not(feature = "encryption"))]
+        {
+            let _ = (key, engine, wuwa_custom_data);
+            return Ok(None);
+        }
+        #[cfg(feature = "encryption")]
+        {
+            match key {
+                super::Key::None => Ok(None),
+                super::Key::Some(_) => {
+                    let partial_limit = match engine {
+                        super::Engine::WutheringWaves => {
+                            Some(crate::entry::wuwa_decrypt_limit(wuwa_custom_data)?)
+                        }
+                        super::Engine::Stock => None,
+                    };
+                    Ok(Some(crate::entry::WriteCrypt {
+                        key,
+                        partial_limit,
+                        custom_data: wuwa_custom_data,
+                    }))
+                }
+            }
+        }
     }
 
     pub fn write_file(
@@ -320,6 +406,7 @@ impl<W: Write + Seek> PakWriter<W> {
         allow_compress: bool,
         data: impl AsRef<[u8]>,
     ) -> Result<(), super::Error> {
+        let crypt = Self::crypt(&self.key, self.engine, self.wuwa_custom_data)?;
         self.pak.index.add_entry(
             path.to_string(),
             Entry::write_file(
@@ -332,6 +419,7 @@ impl<W: Write + Seek> PakWriter<W> {
                     &[]
                 },
                 data.as_ref(),
+                crypt,
             )?,
         );
 
@@ -351,11 +439,16 @@ impl<W: Write + Seek> PakWriter<W> {
     ) -> Result<(), Error> {
         let stream_position = self.writer.stream_position()?;
 
-        let entry = partial_entry.build_entry(
+        let mut entry = partial_entry.build_entry(
             self.pak.version,
             &mut self.pak.compression,
             stream_position,
         )?;
+        let crypt = Self::crypt(&self.key, self.engine, self.wuwa_custom_data)?;
+        if let Some(c) = crypt {
+            entry.flags |= 1;
+            entry.custom_data = c.custom_data;
+        }
 
         entry.write(
             &mut self.writer,
@@ -364,12 +457,17 @@ impl<W: Write + Seek> PakWriter<W> {
         )?;
 
         self.pak.index.add_entry(path, entry);
-        partial_entry.write_data(&mut self.writer)?;
+        partial_entry.write_data(&mut self.writer, crypt)?;
 
         Ok(())
     }
     pub fn write_index(mut self) -> Result<W, super::Error> {
-        self.pak.write(&mut self.writer, &self.key)?;
+        self.pak.write(
+            &mut self.writer,
+            &self.key,
+            self.encryption_guid,
+            self.engine,
+        )?;
         Ok(self.writer)
     }
 }
@@ -565,8 +663,18 @@ impl Pak {
     fn write<W: Write + Seek>(
         &self,
         writer: &mut W,
-        _key: &super::Key,
+        #[allow(unused)] key: &super::Key,
+        encryption_uuid: Option<u128>,
+        engine: super::Engine,
     ) -> Result<(), super::Error> {
+        #[cfg(feature = "encryption")]
+        let encrypting = matches!(key, super::Key::Some(_));
+        #[cfg(not(feature = "encryption"))]
+        let encrypting = {
+            let _ = key;
+            let _ = encryption_uuid;
+            false
+        };
         let index_offset = writer.stream_position()?;
 
         let mut index_buf = vec![];
@@ -596,7 +704,7 @@ impl Pak {
                 let mut encoded_entries = io::Cursor::new(vec![]);
                 for entry in self.index.entries.values() {
                     offsets.push(encoded_entries.get_ref().len() as u32);
-                    entry.write_encoded(&mut encoded_entries)?;
+                    entry.write_encoded(&mut encoded_entries, self.version, engine)?;
                 }
                 (encoded_entries.into_inner(), offsets)
             };
@@ -638,7 +746,14 @@ impl Pak {
                 size
             };
 
-            let path_hash_index_offset = index_offset + bytes_before_phi;
+            let path_hash_index_offset = index_offset
+                + if encrypting {
+                    // AES-encrypted regions must start at a block multiple:
+                    // the index grows to its padded length.
+                    crate::entry::align(bytes_before_phi)
+                } else {
+                    bytes_before_phi
+                };
 
             let mut phi_buf = vec![];
             let mut phi_writer = io::Cursor::new(&mut phi_buf);
@@ -649,11 +764,24 @@ impl Pak {
                 &offsets,
             )?;
 
+            #[cfg(feature = "encryption")]
+            if encrypting {
+                encrypt_store(&mut phi_buf, key)?;
+            }
+
             let full_directory_index_offset = path_hash_index_offset + phi_buf.len() as u64;
 
             let mut fdi_buf = vec![];
             let mut fdi_writer = io::Cursor::new(&mut fdi_buf);
             generate_full_directory_index(&mut fdi_writer, &self.index.entries, &offsets)?;
+
+            #[cfg(feature = "encryption")]
+            if encrypting {
+                // encrypted secondary indexes are stored ciphertext (like the
+                // main index); encrypt here so all offsets/sizes/hashes below
+                // cover the padded stored bytes.
+                encrypt_store(&mut fdi_buf, key)?;
+            }
 
             index_writer.write_u32::<LE>(1)?; // we have path hash index
             index_writer.write_u64::<LE>(path_hash_index_offset)?;
@@ -673,6 +801,11 @@ impl Pak {
             Some((phi_buf, fdi_buf))
         };
 
+        #[cfg(feature = "encryption")]
+        if encrypting {
+            encrypt_store(&mut index_buf, key)?;
+        }
+
         let index_hash = hash(&index_buf);
 
         writer.write_all(&index_buf)?;
@@ -683,8 +816,8 @@ impl Pak {
         }
 
         let footer = super::footer::Footer {
-            encryption_uuid: None,
-            encrypted: false,
+            encryption_uuid,
+            encrypted: encrypting,
             magic: super::MAGIC,
             version: self.version,
             version_major: self.version.version_major(),
@@ -817,5 +950,195 @@ mod test {
         assert_eq!(split_path_child("a//"), Some(("a/", "")));
         assert_eq!(split_path_child("/"), None);
         assert_eq!(split_path_child(""), None);
+    }
+
+    fn test_key() -> aes::Aes256 {
+        use aes::cipher::KeyInit;
+        aes::Aes256::new_from_slice(&[0x42u8; 32]).unwrap()
+    }
+
+    fn write_test_pak(
+        engine: crate::Engine,
+        version: crate::Version,
+        custom_data: u8,
+        files: &[(&str, Vec<u8>)],
+    ) -> Vec<u8> {
+        let mut pak = PakBuilder::new()
+            .key(test_key())
+            .engine(engine)
+            .wuwa_custom_data(custom_data)
+            .encryption_guid(0x0123456789ABCDEF0123456789ABCDEF)
+            .writer(
+                io::Cursor::new(vec![]),
+                version,
+                "../../../".to_string(),
+                Some(0),
+            );
+        for (path, data) in files {
+            pak.write_file(path, false, data).unwrap();
+        }
+        pak.write_index().unwrap().into_inner()
+    }
+
+    fn read_test_pak(engine: crate::Engine, bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+        let mut reader = io::Cursor::new(bytes);
+        let pak = PakBuilder::new()
+            .key(test_key())
+            .engine(engine)
+            .reader(&mut reader)
+            .unwrap();
+        pak.files()
+            .into_iter()
+            .map(|f| {
+                let data = pak.get(&f, &mut reader).unwrap();
+                (f, data)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_wuwa_v11_plaintext_roundtrip() {
+        // no key at all: isolates the WuWa index layout from crypto
+        let files = vec![("w.txt", b"plain wuwa".to_vec())];
+        let mut pak = PakBuilder::new()
+            .engine(crate::Engine::WutheringWaves)
+            .writer(
+                io::Cursor::new(vec![]),
+                crate::Version::V11,
+                "../../../".to_string(),
+                Some(0),
+            );
+        for (path, data) in &files {
+            pak.write_file(path, false, data).unwrap();
+        }
+        let bytes = pak.write_index().unwrap().into_inner();
+        let mut reader = io::Cursor::new(&bytes[..]);
+        let pak = PakBuilder::new()
+            .engine(crate::Engine::WutheringWaves)
+            .reader(&mut reader)
+            .unwrap();
+        let expected: Vec<(String, Vec<u8>)> = files
+            .iter()
+            .map(|(p, d)| (p.to_string(), d.clone()))
+            .collect();
+        let back: Vec<(String, Vec<u8>)> = pak
+            .files()
+            .into_iter()
+            .map(|f| {
+                let data = pak.get(&f, &mut reader).unwrap();
+                (f, data)
+            })
+            .collect();
+        assert_eq!(back, expected);
+    }
+
+    #[test]
+    fn test_encrypted_roundtrip_stock() {
+        let files = vec![
+            ("a.txt", b"hello stock world".to_vec()),
+            ("dir/b.bin", (0..5000u32).map(|i| (i % 251) as u8).collect()),
+        ];
+        let bytes = write_test_pak(crate::Engine::Stock, crate::Version::V8B, 0, &files);
+        let back = read_test_pak(crate::Engine::Stock, &bytes);
+        let expected: Vec<(String, Vec<u8>)> = files
+            .iter()
+            .map(|(p, d)| (p.to_string(), d.clone()))
+            .collect();
+        assert_eq!(back, expected);
+    }
+
+    #[test]
+    fn test_encrypted_roundtrip_v11_empty() {
+        // no entries at all: isolates footer/index-shell crypto
+        let pak = PakBuilder::new()
+            .key(test_key())
+            .engine(crate::Engine::Stock)
+            .writer(
+                io::Cursor::new(vec![]),
+                crate::Version::V11,
+                "../../../".to_string(),
+                Some(0),
+            );
+        let bytes = pak.write_index().unwrap().into_inner();
+        let mut reader = io::Cursor::new(&bytes[..]);
+        let pak = PakBuilder::new()
+            .key(test_key())
+            .engine(crate::Engine::Stock)
+            .reader(&mut reader)
+            .unwrap();
+        assert!(pak.files().is_empty());
+    }
+
+    #[test]
+    fn test_encrypted_roundtrip_stock_v11() {
+        // V11 exercises encrypted secondary index buffers (path hash +
+        // full directory index); V8B does not.
+        let files = vec![("a.txt", b"hello v11".to_vec())];
+        let mut pak = PakBuilder::new()
+            .key(test_key())
+            .engine(crate::Engine::Stock)
+            .encryption_guid(0x0123456789ABCDEF0123456789ABCDEF)
+            .writer(
+                io::Cursor::new(vec![]),
+                crate::Version::V11,
+                "../../../".to_string(),
+                Some(0),
+            );
+        for (path, data) in &files {
+            pak.write_file(path, false, data).unwrap();
+        }
+        let bytes = pak.write_index().unwrap().into_inner();
+        let mut reader = io::Cursor::new(&bytes[..]);
+        let pak = PakBuilder::new()
+            .key(test_key())
+            .engine(crate::Engine::Stock)
+            .reader(&mut reader)
+            .unwrap();
+        let expected: Vec<(String, Vec<u8>)> = files
+            .iter()
+            .map(|(p, d)| (p.to_string(), d.clone()))
+            .collect();
+        let back: Vec<(String, Vec<u8>)> = pak
+            .files()
+            .into_iter()
+            .map(|f| {
+                let data = pak.get(&f, &mut reader).unwrap();
+                (f, data)
+            })
+            .collect();
+        assert_eq!(back, expected);
+    }
+
+    #[test]
+    fn test_encrypted_roundtrip_wuwa_partial() {
+        // bigger than the 0x800 CustomData-2 prefix: proves only the prefix
+        // is encrypted (stock full-decrypt of the same bytes must NOT match).
+        let payload: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let files = vec![("w.txt", payload)];
+        // V11: CustomData survives in encoded index records (plain-struct
+        // entries of older versions cannot carry it).
+        let bytes = write_test_pak(
+            crate::Engine::WutheringWaves,
+            crate::Version::V11,
+            2,
+            &files,
+        );
+        let back = read_test_pak(crate::Engine::WutheringWaves, &bytes);
+        let expected: Vec<(String, Vec<u8>)> = files
+            .iter()
+            .map(|(p, d)| (p.to_string(), d.clone()))
+            .collect();
+        assert_eq!(back, expected);
+        // stock full-decrypt of WuWa partial data must differ (or fail to read at all)
+        let mut reader = io::Cursor::new(&bytes[..]);
+        let stock_data = PakBuilder::new()
+            .key(test_key())
+            .engine(crate::Engine::Stock)
+            .reader(&mut reader)
+            .ok()
+            .and_then(|pak| pak.get("w.txt", &mut reader).ok());
+        if let Some(data) = stock_data {
+            assert_ne!(data, files[0].1);
+        }
     }
 }

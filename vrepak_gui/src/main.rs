@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use eframe::egui;
+use strum::VariantNames;
 
 const INSTRUCTION: &str = "In order to make this work you first need to understand JSON and its query language. If you don't, please close this window. If your game never changes its AES keys or is not even encrypted, please close this window. If you do understand what you are doing, you have to know that the AES expression supports up to 2 elements.\n\nThe first element is mandatory and will be assigned to the main AES key. It has to be looking like a key, else your configuration will not be valid (the key validity against your files will not be checked). Said key must be hexadecimal and can start without \"0x\".\n\nIf your game uses several AES keys, you can specify a second element that will be your list of dynamic keys. The format needed is a list of objects with, at least, the next 2 variables:\n{\n  \"guid\": \"the archive guid\",\n  \"key\": \"the archive aes key\"\n}";
 
@@ -17,6 +18,7 @@ const INSTRUCTION: &str = "In order to make this work you first need to understa
 enum Tab {
     Endpoint,
     Pak,
+    Pack,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,6 +42,7 @@ enum JobResult {
     EndpointJson { pretty: String, ok: bool, status: String },
     EndpointTest { report: String, ok: bool, status: String },
     Pak { text: String, ok: bool, status: String },
+    Pack { text: String, ok: bool, status: String },
 }
 
 fn aes_from_bytes(bytes: &[u8; 32]) -> aes::Aes256 {
@@ -213,6 +216,77 @@ fn pak_unpack_with_key(
     Ok(format!("Unpacked {count} files to {out_dir}"))
 }
 
+fn pak_pack_text(
+    input: &str,
+    output: &str,
+    mount: &str,
+    version: vrepak::Version,
+    compression: Option<vrepak::Compression>,
+    key: Option<aes::Aes256>,
+    guid: u128,
+    custom_data: u8,
+    engine: vrepak::Engine,
+) -> Result<String, String> {
+    fn collect_files(paths: &mut Vec<PathBuf>, dir: &std::path::Path) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                collect_files(paths, &path)?;
+            } else {
+                paths.push(path);
+            }
+        }
+        Ok(())
+    }
+    let input_path = std::path::Path::new(input);
+    if !input_path.is_dir() {
+        return Err(format!("input is not a directory: {input}"));
+    }
+    let mut paths = vec![];
+    collect_files(&mut paths, input_path).map_err(|e| e.to_string())?;
+    paths.sort();
+
+    let mut builder = vrepak::PakBuilder::new()
+        .engine(engine)
+        .wuwa_custom_data(custom_data);
+    if let Some(c) = compression {
+        builder = builder.compression([c]);
+    }
+    let encrypting = key.is_some();
+    if let Some(k) = key {
+        builder = builder.key(k);
+    }
+    if encrypting && guid != 0 {
+        builder = builder.encryption_guid(guid);
+    }
+    let mut pak = builder.writer(
+        std::io::BufWriter::new(File::create(output).map_err(|e| e.to_string())?),
+        version,
+        mount.to_string(),
+        Some(0),
+    );
+    let entry_builder = pak.entry_builder();
+    for p in &paths {
+        let rel = p
+            .strip_prefix(input_path)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let data = std::fs::read(p).map_err(|e| e.to_string())?;
+        let entry = entry_builder
+            .build_entry(true, data)
+            .map_err(|e| e.to_string())?;
+        pak.write_entry(rel, entry).map_err(|e| e.to_string())?;
+    }
+    pak.write_index().map_err(|e| e.to_string())?;
+    Ok(if encrypting {
+        format!("Packed {} files to {output} (encrypted, engine {engine})", paths.len())
+    } else {
+        format!("Packed {} files to {output}", paths.len())
+    })
+}
+
 struct GuiApp {
     tab: Tab,
     endpoint: String,
@@ -224,6 +298,14 @@ struct GuiApp {
     aes_key: String,
     engine: vrepak::Engine,
     pak_output: String,
+    pack_input: String,
+    pack_output: String,
+    pack_mount: String,
+    pack_version: vrepak::Version,
+    pack_compression: Option<vrepak::Compression>,
+    pack_guid: String,
+    pack_custom_data: String,
+    pack_log: String,
     pending: Option<Receiver<JobResult>>,
     busy: bool,
 }
@@ -246,6 +328,14 @@ impl GuiApp {
             aes_key: String::new(),
             engine: vrepak::Engine::Stock,
             pak_output: String::new(),
+            pack_input: String::new(),
+            pack_output: String::new(),
+            pack_mount: "../../../".to_string(),
+            pack_version: vrepak::Version::V8B,
+            pack_compression: None,
+            pack_guid: String::new(),
+            pack_custom_data: "2".to_string(),
+            pack_log: String::new(),
             pending: None,
             busy: false,
         }
@@ -295,6 +385,10 @@ impl GuiApp {
                 }
                 JobResult::Pak { text, ok, status } => {
                     self.pak_output = text;
+                    self.set_status(status, if ok { StatusKind::Ok } else { StatusKind::Err });
+                }
+                JobResult::Pack { text, ok, status } => {
+                    self.pack_log = text;
                     self.set_status(status, if ok { StatusKind::Ok } else { StatusKind::Err });
                 }
             }
@@ -584,20 +678,6 @@ impl GuiApp {
             None,
         );
         ui.horizontal(|ui| {
-            ui.label("Engine");
-            ui.selectable_value(
-                &mut self.engine,
-                vrepak::Engine::Stock,
-                "Stock UE",
-            );
-            ui.selectable_value(
-                &mut self.engine,
-                vrepak::Engine::WutheringWaves,
-                "Wuthering Waves",
-            );
-            ui.label("(Kuro modded engine: descrambled index + partially encrypted data)");
-        });
-        ui.horizontal(|ui| {
             if ui.button("Info").clicked() {
                 self.on_info();
             }
@@ -616,6 +696,192 @@ impl GuiApp {
                 .desired_width(f32::INFINITY),
         );
     }
+
+    fn show_pack_tab(&mut self, ui: &mut egui::Ui) {
+        if Self::field_row(
+            ui,
+            "Input dir",
+            &mut self.pack_input,
+            r"C:\mods\mymod",
+            Some("…"),
+        ) {
+            if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                self.pack_input = p.to_string_lossy().into_owned();
+                if self.pack_output.trim().is_empty() {
+                    self.pack_output = format!("{}.pak", self.pack_input);
+                }
+            }
+        }
+        Self::field_row(
+            ui,
+            "Output pak",
+            &mut self.pack_output,
+            r"C:\mods\mymod.pak",
+            None,
+        );
+        Self::field_row(
+            ui,
+            "Mount point",
+            &mut self.pack_mount,
+            "../../../",
+            None,
+        );
+        ui.horizontal(|ui| {
+            ui.label("Version");
+            egui::ComboBox::from_id_salt("pack_version")
+                .selected_text(self.pack_version.to_string())
+                .show_ui(ui, |ui| {
+                    for name in vrepak::Version::VARIANTS {
+                        let v: vrepak::Version = name.parse().unwrap();
+                        ui.selectable_value(&mut self.pack_version, v, *name);
+                    }
+                });
+            ui.label("Compression");
+            let label = self
+                .pack_compression
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "None".to_string());
+            egui::ComboBox::from_id_salt("pack_compression")
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.pack_compression, None, "None");
+                    for name in vrepak::Compression::VARIANTS {
+                        let c: vrepak::Compression = name.parse().unwrap();
+                        ui.selectable_value(&mut self.pack_compression, Some(c), *name);
+                    }
+                });
+        });
+        Self::field_row(
+            ui,
+            "Encryption GUID",
+            &mut self.pack_guid,
+            "(empty = zeros; needs AES key above or endpoint)",
+            None,
+        );
+        Self::field_row(
+            ui,
+            "WuWa CustomData",
+            &mut self.pack_custom_data,
+            "2 (0: full, 1: 0x200000, 2: 0x800, 4: plain)",
+            None,
+        );
+        ui.horizontal(|ui| {
+            if ui.button("Pack").clicked() {
+                self.on_pack();
+            }
+            ui.label("Key: explicit AES field, else endpoint main key. Engine: top bar.");
+        });
+        let rows = Self::fill_rows(ui);
+        ui.add(
+            egui::TextEdit::multiline(&mut self.pack_log)
+                .code_editor()
+                .desired_rows(rows)
+                .desired_width(f32::INFINITY),
+        );
+    }
+
+    fn on_pack(&mut self) {
+        if self.busy || self.pack_input.trim().is_empty() {
+            return;
+        }
+        let input = self.pack_input.clone();
+        let output = if self.pack_output.trim().is_empty() {
+            format!("{input}.pak")
+        } else {
+            self.pack_output.clone()
+        };
+        let (ep, ex) = self.endpoint_args();
+        let aes = if self.aes_key.trim().is_empty() {
+            None
+        } else {
+            Some(self.aes_key.clone())
+        };
+        // resolve synchronously so endpoint failures are reported distinctly
+        let key = match aes {
+            Some(k) => match vrepak_endpoint::parse_aes_key(&k) {
+                Ok(b) => Some(aes_from_bytes(&b)),
+                Err(e) => {
+                    self.pack_log = e.to_string();
+                    self.set_status(
+                        format!("Pack failed [key]: {e}"),
+                        StatusKind::Err,
+                    );
+                    return;
+                }
+            },
+            None => match ep {
+                Some(ep) if !ep.trim().is_empty() => {
+                    let cfg = vrepak_endpoint::EndpointConfig::new(&ep, &ex.unwrap_or_default());
+                    match vrepak_endpoint::fetch_and_resolve(&cfg) {
+                        Ok((_json, resolved)) => {
+                            Some(aes_from_bytes(&resolved.key_for_guid(None)))
+                        }
+                        Err(e) => {
+                            self.pack_log = e.to_string();
+                            self.set_status(
+                                format!("Pack failed [endpoint]: {e}"),
+                                StatusKind::Err,
+                            );
+                            return;
+                        }
+                    }
+                }
+                _ => None,
+            },
+        };
+        let guid = if self.pack_guid.trim().is_empty() {
+            0
+        } else {
+            match vrepak_endpoint::parse_guid(&self.pack_guid) {
+                Ok((g, _)) => g,
+                Err(e) => {
+                    self.pack_log = e.to_string();
+                    self.set_status(
+                        format!("Pack failed [guid]: {e}"),
+                        StatusKind::Err,
+                    );
+                    return;
+                }
+            }
+        };
+        let custom_data: u8 = match self.pack_custom_data.trim().parse() {
+            Ok(n) => n,
+            Err(_) => {
+                self.pack_log = "CustomData must be a number (0, 1, 2 or 4)".to_string();
+                self.set_status("Pack failed [custom data]", StatusKind::Err);
+                return;
+            }
+        };
+        let mount = self.pack_mount.clone();
+        let version = self.pack_version;
+        let compression = self.pack_compression;
+        let engine = self.engine;
+        self.set_status("Packing…", StatusKind::Info);
+        self.spawn_job(
+            move || match pak_pack_text(
+                &input,
+                &output,
+                &mount,
+                version,
+                compression,
+                key,
+                guid,
+                custom_data,
+                engine,
+            ) {
+                Ok(t) => JobResult::Pack {
+                    text: t.clone(),
+                    ok: true,
+                    status: t,
+                },
+                Err(e) => JobResult::Pack {
+                    text: e.clone(),
+                    ok: false,
+                    status: format!("Pack failed: {e}"),
+                },
+            },
+        );
+    }
 }
 
 impl eframe::App for GuiApp {
@@ -628,6 +894,15 @@ impl eframe::App for GuiApp {
                 ui.separator();
                 ui.selectable_value(&mut self.tab, Tab::Endpoint, "Endpoint (AES)");
                 ui.selectable_value(&mut self.tab, Tab::Pak, "Pak Tools");
+                ui.selectable_value(&mut self.tab, Tab::Pack, "Pack");
+                ui.separator();
+                ui.label("Engine");
+                ui.selectable_value(&mut self.engine, vrepak::Engine::Stock, "Stock UE");
+                ui.selectable_value(
+                    &mut self.engine,
+                    vrepak::Engine::WutheringWaves,
+                    "Wuthering Waves",
+                );
                 if self.busy {
                     ui.spinner();
                 }
@@ -661,6 +936,7 @@ impl eframe::App for GuiApp {
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
             Tab::Endpoint => self.show_endpoint_tab(ui),
             Tab::Pak => self.show_pak_tab(ui),
+            Tab::Pack => self.show_pack_tab(ui),
         });
     }
 }

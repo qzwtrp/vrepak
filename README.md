@@ -113,15 +113,34 @@ engine picker:
 $ vrepak --engine wuthering-waves --endpoint https://example.com/keys.json unpack MyGame.pak
 ```
 
-In the GUI, pick *Wuthering Waves* in the *Engine* row of the Pak Tools tab.
-Stock UE paks keep working with the default `stock` engine. Writing WuWa
-paks is not supported (read-only).
+In the GUI, pick *Wuthering Waves* in the *Engine* selector in the top bar.
+Stock UE paks keep working with the default `stock` engine.
+
+### packing back with encryption
+
+Passing a key to `pack` writes an encrypted pak (AES-256 index + file data).
+The key comes from `--aes-key`, or from the endpoint's main key when
+`--endpoint` is given. `--encryption-guid` records the key GUID in the footer
+(default zeros, like Wuthering Waves paks):
+
+```console
+$ vrepak --aes-key 0x1234... pack mymod --encryption-guid B8BB... --version V11 --engine wuthering-waves
+Packed 65 files to mymod.pak (encrypted, engine wuthering-waves)
+```
+
+With `--engine wuthering-waves`, fresh entries get `--wuwa-custom-data`
+(default 2 = first 0x800 bytes encrypted: 0 means fully encrypted, 1 means
+first 0x200000 bytes, 4 means plaintext) and index records use the scrambled
+WuWa layout, so the game reads them back. Packing with the wrong CustomData
+makes those files unreadable to the game.
 
 ## gui
 
 `vrepak-gui` is a native GUI wrapper around the `vrepak` library (no WebView needed)
 with an *Endpoint Configuration (AES)* dialog: Endpoint + Send, instruction,
-Expression + Test, validity status bar, plus basic pak tools (`info` / `list` / `unpack`).
+Expression + Test, validity status bar, plus *Pak Tools* (`info` / `list` /
+`unpack`, with per-pak key diagnostics) and *Pack* (directory to encrypted or
+plain `.pak`, same keys/engine as the CLI) tabs.
 
 ```console
 $ cargo run -p vrepak_gui

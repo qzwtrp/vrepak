@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use crate::{
-    entry::{Block, Entry},
+    entry::{pad16, Block, Entry, WriteCrypt},
     Compression, Error, Hash, Version, VersionMajor,
 };
 
@@ -120,16 +120,43 @@ impl<D: AsRef<[u8]>> PartialEntry<D> {
             custom_data: 0,
         })
     }
-    pub(crate) fn write_data<S: Write>(&self, stream: &mut S) -> Result<()> {
-        match &self.data {
-            PartialEntryData::Slice(data) => {
-                stream.write_all(data.as_ref())?;
-            }
+    pub(crate) fn write_data<S: Write>(&self, stream: &mut S, crypt: Option<WriteCrypt>) -> Result<()> {
+        let mut chunks: Vec<Vec<u8>> = match &self.data {
+            PartialEntryData::Slice(data) => vec![data.as_ref().to_vec()],
             PartialEntryData::Blocks(blocks) => {
-                for block in blocks {
-                    stream.write_all(&block.data)?;
+                blocks.iter().map(|b| b.data.clone()).collect()
+            }
+        };
+        if crypt.is_some() {
+            // Stored size must stay a multiple of the AES block size so the
+            // reader's aligned reads consume exactly what we wrote.
+            for chunk in &mut chunks {
+                pad16(chunk);
+            }
+            #[cfg(feature = "encryption")]
+            if let Some(c) = crypt {
+                if let crate::Key::Some(key) = c.key {
+                    use aes::cipher::BlockEncrypt;
+                    // WuWa-style partial encryption covers a prefix of the
+                    // concatenated stored bytes; the rest stays plaintext.
+                    let mut remaining = c.partial_limit;
+                    for chunk in &mut chunks {
+                        let n = match remaining {
+                            Some(r) => ((chunk.len() as u64).min(r) & !15) as usize,
+                            None => chunk.len(),
+                        };
+                        for block in chunk[..n].chunks_mut(16) {
+                            key.encrypt_block(aes::Block::from_mut_slice(block));
+                        }
+                        if let Some(r) = remaining.as_mut() {
+                            *r = r.saturating_sub(n as u64);
+                        }
+                    }
                 }
             }
+        }
+        for chunk in &chunks {
+            stream.write_all(chunk)?;
         }
         Ok(())
     }

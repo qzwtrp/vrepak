@@ -7,7 +7,7 @@ repository = "https://github.com/qzwtrp/vrepak"
 description = "Unreal Engine .pak file suite in Rust (GUI, CLI, & Lib)"
 authors = ["qzwtrp"]
 license = "MIT OR Apache-2.0"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 keywords = ["unreal-engine", "pak", "unrealpak"]
 

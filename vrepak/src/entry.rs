@@ -31,7 +31,7 @@ impl Block {
     }
 }
 
-fn align(offset: u64) -> u64 {
+pub(crate) fn align(offset: u64) -> u64 {
     // add alignment (aes block size: 16) then zero out alignment bits
     (offset + 15) & !15
 }
@@ -65,6 +65,23 @@ pub(crate) struct Entry {
     pub custom_data: u8,
 }
 
+/// Encryption parameters for writing an entry (crate-internal).
+#[derive(Clone, Copy)]
+pub(crate) struct WriteCrypt<'a> {
+    pub key: &'a super::Key,
+    /// Wuthering Waves partial prefix length; `None` = full-buffer AES.
+    pub partial_limit: Option<u64>,
+    /// CustomData byte for WuWa index records (ignored for stock).
+    pub custom_data: u8,
+}
+
+/// Pad buffer length up to 16 bytes (AES block size) with zeros.
+pub(crate) fn pad16(buf: &mut Vec<u8>) {
+    while buf.len() % 16 != 0 {
+        buf.push(0);
+    }
+}
+
 /// Undo the Wuthering Waves bitfield scrambling for V11+ encoded entries
 /// (mirrors CUE4Parse `FPakEntry` handling for `GAME_WutheringWaves`).
 fn wuwa_descramble(bitfield: u32) -> u32 {
@@ -79,7 +96,7 @@ fn wuwa_descramble(bitfield: u32) -> u32 {
 /// Number of leading entry-data bytes that are AES-encrypted for a
 /// Wuthering Waves entry (`u64::MAX` = whole entry). Mirrors CUE4Parse
 /// `CalculateEncryptedBytesCountForWutheringWaves`.
-fn wuwa_decrypt_limit(custom_data: u8) -> Result<u64, super::Error> {
+pub(crate) fn wuwa_decrypt_limit(custom_data: u8) -> Result<u64, super::Error> {
     match custom_data {
         0 => Ok(u64::MAX),
         1 => Ok(0x200000),
@@ -94,6 +111,18 @@ fn wuwa_decrypt_limit(custom_data: u8) -> Result<u64, super::Error> {
 /// Whether the Wuthering Waves encoded-entry layout applies.
 fn wuwa_entries(version: super::Version, engine: super::Engine) -> bool {
     engine == super::Engine::WutheringWaves && version >= super::Version::V11
+}
+
+/// Inverse of [`wuwa_descramble`]: scramble stock bitfield bits into the
+/// on-disk Wuthering Waves layout for writing.
+fn wuwa_scramble(bits: u32) -> u32 {
+    ((bits & 0x3F) << 16)
+        | ((bits >> 6) & 0xFFFF)
+        | ((bits & (1 << 22)) << 6)
+        | ((bits & 0x1F80_0000) >> 1)
+        | ((bits & (1 << 29)) << 1)
+        | ((bits & (1 << 30)) << 1)
+        | ((bits & (1 << 31)) >> 2)
 }
 
 impl Entry {
@@ -139,12 +168,17 @@ impl Entry {
         compression_slots: &mut Vec<Option<Compression>>,
         allowed_compression: &[Compression],
         data: &[u8],
+        crypt: Option<WriteCrypt>,
     ) -> Result<Self, Error> {
         let partial_entry = build_partial_entry(allowed_compression, data)?;
         let stream_position = writer.stream_position()?;
-        let entry = partial_entry.build_entry(version, compression_slots, stream_position)?;
+        let mut entry = partial_entry.build_entry(version, compression_slots, stream_position)?;
+        if let Some(crypt) = crypt {
+            entry.flags |= 1;
+            entry.custom_data = crypt.custom_data;
+        }
         entry.write(writer, version, crate::entry::EntryLocation::Data)?;
-        partial_entry.write_data(writer)?;
+        partial_entry.write_data(writer, crypt)?;
         Ok(entry)
     }
 
@@ -320,7 +354,20 @@ impl Entry {
         })
     }
 
-    pub fn write_encoded<W: io::Write>(&self, writer: &mut W) -> Result<(), super::Error> {
+    pub fn write_encoded<W: io::Write>(
+        &self,
+        writer: &mut W,
+        version: super::Version,
+        engine: super::Engine,
+    ) -> Result<(), super::Error> {
+        let wuwa = wuwa_entries(version, engine);
+        // WuWa stores offset/size swapped; compute the flags from the
+        // swapped values so they round-trip through descramble + swap.
+        let (offset, uncompressed) = if wuwa {
+            (self.uncompressed, self.offset)
+        } else {
+            (self.offset, self.uncompressed)
+        };
         let mut compression_block_size = (self.compression_block_size >> 11) & 0x3f;
         if (compression_block_size << 11) != self.compression_block_size {
             compression_block_size = 0x3f;
@@ -331,8 +378,8 @@ impl Entry {
             0
         };
         let is_size_32_bit_safe = self.compressed <= u32::MAX as u64;
-        let is_uncompressed_size_32_bit_safe = self.uncompressed <= u32::MAX as u64;
-        let is_offset_32_bit_safe = self.offset <= u32::MAX as u64;
+        let is_uncompressed_size_32_bit_safe = uncompressed <= u32::MAX as u64;
+        let is_offset_32_bit_safe = offset <= u32::MAX as u64;
 
         assert!(
             compression_blocks_count < 0x10_000,
@@ -347,22 +394,27 @@ impl Entry {
             | ((is_uncompressed_size_32_bit_safe as u32) << 30)
             | ((is_offset_32_bit_safe as u32) << 31);
 
-        writer.write_u32::<LE>(flags)?;
+        if wuwa {
+            writer.write_u32::<LE>(wuwa_scramble(flags))?;
+            writer.write_u8(self.custom_data)?;
+        } else {
+            writer.write_u32::<LE>(flags)?;
+        }
 
         if compression_block_size == 0x3f {
             writer.write_u32::<LE>(self.compression_block_size)?;
         }
 
         if is_offset_32_bit_safe {
-            writer.write_u32::<LE>(self.offset as u32)?;
+            writer.write_u32::<LE>(offset as u32)?;
         } else {
-            writer.write_u64::<LE>(self.offset)?;
+            writer.write_u64::<LE>(offset)?;
         }
 
         if is_uncompressed_size_32_bit_safe {
-            writer.write_u32::<LE>(self.uncompressed as u32)?
+            writer.write_u32::<LE>(uncompressed as u32)?
         } else {
-            writer.write_u64::<LE>(self.uncompressed)?
+            writer.write_u64::<LE>(uncompressed)?
         }
 
         if self.compression_slot.is_some() {
@@ -555,5 +607,53 @@ mod test {
         assert_eq!(super::wuwa_decrypt_limit(4).unwrap(), 0);
         assert!(super::wuwa_decrypt_limit(3).is_err());
         assert!(super::wuwa_decrypt_limit(9).is_err());
+    }
+
+    #[test]
+    fn test_wuwa_scramble_roundtrip() {
+        // scramble must be the exact inverse of descramble
+        let mut x = 0x12345678u32;
+        for _ in 0..1000 {
+            // xorshift
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            assert_eq!(super::wuwa_descramble(super::wuwa_scramble(x)), x);
+        }
+    }
+
+    #[test]
+    fn test_wuwa_record_roundtrip() {
+        let entry = super::Entry {
+            offset: 123456,
+            compressed: 70000,
+            uncompressed: 70000,
+            compression_slot: None,
+            timestamp: None,
+            hash: None,
+            blocks: None,
+            flags: 1,
+            compression_block_size: 0,
+            custom_data: 2,
+        };
+        let mut buf = vec![];
+        entry
+            .write_encoded(
+                &mut buf,
+                super::Version::V11,
+                crate::Engine::WutheringWaves,
+            )
+            .unwrap();
+        let back = super::Entry::read_encoded(
+            &mut std::io::Cursor::new(&buf),
+            super::Version::V11,
+            crate::Engine::WutheringWaves,
+        )
+        .unwrap();
+        assert_eq!(back.offset, entry.offset);
+        assert_eq!(back.uncompressed, entry.uncompressed);
+        assert_eq!(back.compressed, entry.compressed);
+        assert_eq!(back.flags, entry.flags);
+        assert_eq!(back.custom_data, 2);
     }
 }
