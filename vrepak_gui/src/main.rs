@@ -2,6 +2,7 @@
 //!
 //! Pure Rust egui: no WebView, no JavaScript, no IPC. Endpoint fetching and
 //! pak operations run in worker threads; the UI only polls results.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::fs::File;
 use std::io::BufReader;
