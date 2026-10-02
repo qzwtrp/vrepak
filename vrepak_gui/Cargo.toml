@@ -1,6 +1,6 @@
 [package]
 name = "vrepak_gui"
-description = "Tauri GUI wrapper for vrepak with Endpoint Configuration (AES)"
+description = "Native GUI for vrepak with Endpoint Configuration (AES)"
 repository.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -14,22 +14,12 @@ path = "src/main.rs"
 [dependencies]
 vrepak = { path = "../vrepak" }
 vrepak_endpoint = { path = "../vrepak_endpoint" }
-serde = { version = "1.0", features = ["derive"] }
+eframe = "0.32"
+rfd = "0.15"
+open = "5"
 serde_json = "1.0"
-tauri = { version = "2", features = [] }
-tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
 aes = { workspace = true }
-hex = { workspace = true }
-base64 = { workspace = true }
 
-[build-dependencies]
-tauri-build = "2"
-
-[features]
-default = ["custom-protocol"]
-custom-protocol = ["tauri/custom-protocol"]
-
-# GUI ships via `tauri build`, not cargo-dist
+# GUI ships via plain cargo/tauri-independent builds, not cargo-dist
 [package.metadata.dist]
 dist = false

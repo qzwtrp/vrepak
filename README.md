@@ -101,9 +101,9 @@ The GUI (`vrepak-gui`) persists the endpoint configuration to
 
 ## gui
 
-`vrepak-gui` is a Tauri GUI wrapper around the `vrepak` library with an
-*Endpoint Configuration (AES)* dialog (FModel-style: Endpoint + Send, instruction,
-Expression + Test, validity status bar) plus basic pak tools (`info` / `list` / `unpack`).
+`vrepak-gui` is a native GUI wrapper around the `vrepak` library (no WebView needed)
+with an *Endpoint Configuration (AES)* dialog: Endpoint + Send, instruction,
+Expression + Test, validity status bar, plus basic pak tools (`info` / `list` / `unpack`).
 
 ```console
 $ cargo run -p vrepak_gui
@@ -116,7 +116,7 @@ $ cargo run -p vrepak_gui
 | `vrepak` | Core library: reading/writing `.pak` (fork of [`repak`](https://github.com/trumank/repak)) |
 | `vrepak_cli` | `vrepak` binary: `info` / `list` / `hash-list` / `unpack` / `pack` / `get` / `endpoint-test` |
 | `vrepak_endpoint` | Endpoint configuration (AES): fetch JSON + JSONPath evaluation + key validation (FModel compatible) |
-| `vrepak_gui` | `vrepak-gui` binary: Tauri GUI wrapper |
+| `vrepak_gui` | `vrepak-gui` binary: native egui GUI |
 | `oodle_loader` | Optional Oodle loader (unchanged from upstream) |
 
 ## compatibility
