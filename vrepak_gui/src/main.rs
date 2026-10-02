@@ -37,13 +37,47 @@ fn aes_from_bytes(bytes: &[u8; 32]) -> aes::Aes256 {
     aes::Aes256::new_from_slice(bytes).expect("32 bytes")
 }
 
+/// Append a debug line to %TEMP%/vrepak-gui-debug.log.
+/// Lets us see whether the frontend JS actually reaches the backend.
+fn debug_log(cmd: &str, detail: &str) {
+    use std::fmt::Write as _;
+    let mut line = String::new();
+    let _ = writeln!(
+        line,
+        "[{:?}] {cmd}: {detail}",
+        std::time::SystemTime::now()
+    );
+    let path = std::env::temp_dir().join("vrepak-gui-debug.log");
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+#[tauri::command]
+fn frontend_ping() -> String {
+    debug_log("frontend_ping", "frontend JS is alive and IPC works");
+    "vrepak-gui backend 0.3.0+g2 ok".to_string()
+}
+
 #[tauri::command]
 fn fetch_endpoint(endpoint: String) -> Result<serde_json::Value, String> {
-    vrepak_endpoint::fetch_json(&endpoint).map_err(|e| e.to_string())
+    debug_log("fetch_endpoint", &endpoint);
+    let r = vrepak_endpoint::fetch_json(&endpoint).map_err(|e| e.to_string());
+    debug_log(
+        "fetch_endpoint.done",
+        if r.is_ok() { "ok" } else { "err" },
+    );
+    r
 }
 
 #[tauri::command]
 fn test_expression(endpoint: String, expression: String) -> TestResult {
+    debug_log("test_expression", &format!("{endpoint} | {expression}"));
     let cfg = vrepak_endpoint::EndpointConfig::new(&endpoint, &expression);
     match vrepak_endpoint::fetch_and_resolve(&cfg) {
         Ok((_json, resolved)) => {
@@ -77,6 +111,7 @@ fn test_expression(endpoint: String, expression: String) -> TestResult {
 
 #[tauri::command]
 fn save_endpoint_config(endpoint: String, expression: String) -> Result<String, String> {
+    debug_log("save_endpoint_config", &endpoint);
     let cfg = vrepak_endpoint::EndpointConfig::new(endpoint, expression);
     let path = vrepak_endpoint::default_config_path();
     vrepak_endpoint::save_config(&path, &cfg).map_err(|e| e.to_string())?;
@@ -85,6 +120,7 @@ fn save_endpoint_config(endpoint: String, expression: String) -> Result<String, 
 
 #[tauri::command]
 fn load_endpoint_config() -> vrepak_endpoint::EndpointConfig {
+    debug_log("load_endpoint_config", "-");
     let path = vrepak_endpoint::default_config_path();
     vrepak_endpoint::load_config(&path).unwrap_or_default()
 }
@@ -129,6 +165,7 @@ fn pak_info(
     endpoint: Option<String>,
     expression: Option<String>,
 ) -> Result<PakInfo, String> {
+    debug_log("pak_info", &pak_path);
     let key = resolve_key_for_pak(&pak_path, aes_key, endpoint, expression)?;
     let mut builder = vrepak::PakBuilder::new();
     if let Some(k) = key {
@@ -153,6 +190,7 @@ fn pak_list(
     expression: Option<String>,
     strip_prefix: Option<String>,
 ) -> Result<Vec<String>, String> {
+    debug_log("pak_list", &pak_path);
     let key = resolve_key_for_pak(&pak_path, aes_key, endpoint, expression)?;
     let mut builder = vrepak::PakBuilder::new();
     if let Some(k) = key {
@@ -183,6 +221,7 @@ fn pak_unpack(
     endpoint: Option<String>,
     expression: Option<String>,
 ) -> Result<String, String> {
+    debug_log("pak_unpack", &format!("{pak_path} -> {out_dir}"));
     let key = resolve_key_for_pak(&pak_path, aes_key, endpoint, expression)?;
     let mut builder = vrepak::PakBuilder::new();
     if let Some(k) = key {
@@ -217,6 +256,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
+            frontend_ping,
             fetch_endpoint,
             test_expression,
             save_endpoint_config,

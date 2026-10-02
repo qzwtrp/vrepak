@@ -34,15 +34,15 @@
 </style>
 </head>
 <body>
-<header><b>Endpoint Configuration (AES)</b><button onclick="window.close()">✕</button></header>
+<header><b>Endpoint Configuration (AES)</b><button id="btnClose">✕</button></header>
 <div class="tabs">
-  <button id="tabEndpoint" class="active" onclick="showTab('endpoint')">Endpoint (AES)</button>
-  <button id="tabPak" onclick="showTab('pak')">Pak Tools</button>
+  <button id="tabEndpoint" class="active">Endpoint (AES)</button>
+  <button id="tabPak">Pak Tools</button>
 </div>
 
 <main id="viewEndpoint">
   <div class="col">
-    <div class="row"><label>Endpoint</label><input id="endpoint" type="text" value="" placeholder="https://..." /><button class="primary" onclick="onSend()">Send</button></div>
+    <div class="row"><label>Endpoint</label><input id="endpoint" type="text" value="" placeholder="https://..." /><button class="primary" id="btnSend">Send</button></div>
     <pre class="json" id="jsonView">1</pre>
   </div>
   <div class="col instruction">
@@ -51,29 +51,30 @@
     <p>The first element is mandatory and will be assigned to the main AES key. It has to be looking like a key, else your configuration will not be valid (the key validity against your files will not be checked). Said key must be hexadecimal and can start without "0x".</p>
     <p>If your game uses several AES keys, you can specify a second element that will be your list of dynamic keys. The format needed is a list of objects with, at least, the next 2 variables:<br/>
     {<br/>&nbsp;&nbsp;"guid": "the archive guid",<br/>&nbsp;&nbsp;"key": "the archive aes key"<br/>}</p>
-    <div class="row"><label>Expression</label><input id="expression" type="text" value="" placeholder="$['mainKey', 'dynamicKeys']" /><button class="primary" onclick="onTest()">Test</button></div>
+    <div class="row"><label>Expression</label><input id="expression" type="text" value="" placeholder="$['mainKey', 'dynamicKeys']" /><button class="primary" id="btnTest">Test</button></div>
     <pre class="json" id="exprResult">1</pre>
   </div>
 </main>
 
 <main id="viewPak" style="display:none">
   <div class="col">
-    <div class="pak-row"><label>Pak file</label><input id="pakPath" type="text" placeholder="C:\games\pakchunk0.pak" /><button class="ghost" onclick="browsePak()">…</button></div>
+    <div class="pak-row"><label>Pak file</label><input id="pakPath" type="text" placeholder="C:\games\pakchunk0.pak" /><button class="ghost" id="btnBrowse">…</button></div>
     <div class="pak-row"><label>AES key (optional if endpoint set)</label><input id="aesKey" type="text" placeholder="0x..." /></div>
     <div class="pak-row">
-      <button class="primary" onclick="onInfo()">Info</button>
-      <button class="primary" onclick="onList()">List</button>
-      <button class="primary" onclick="onUnpack()">Unpack</button>
+      <button class="primary" id="btnInfo">Info</button>
+      <button class="primary" id="btnList">List</button>
+      <button class="primary" id="btnUnpack">Unpack</button>
     </div>
     <div id="fileList">Pak output…</div>
   </div>
 </main>
 
 <footer>
+  <span id="ver" title="UI build">g2</span>
   <span id="status">Configure endpoint, then press Test.</span>
-  <button class="ghost" onclick="onOk()">OK</button>
-  <button class="ghost" onclick="window.open('https://github.com/4sval/FModel/wiki/Settings-Explanation#endpoint-configuration','_blank')">Expression Syntax</button>
-  <button class="ghost" onclick="window.open('https://jsonpath.com/','_blank')">Online Evaluator</button>
+  <button class="ghost" id="btnOk">OK</button>
+  <button class="ghost" id="btnSyntax">Expression Syntax</button>
+  <button class="ghost" id="btnEval">Online Evaluator</button>
 </footer>
 
 <script>
@@ -178,18 +179,38 @@ async function onUnpack() {
     document.getElementById('fileList').textContent = msg;
   } catch (e) { document.getElementById('fileList').textContent = String(e); }
 }
-// backend connectivity + auto-load saved config
+// wire buttons (no inline onclick so nothing depends on handler attributes)
+function wire(id, fn) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('click', (ev) => { ev.preventDefault(); fn(); });
+}
+wire('btnClose', () => window.close());
+wire('tabEndpoint', () => showTab('endpoint'));
+wire('tabPak', () => showTab('pak'));
+wire('btnSend', onSend);
+wire('btnTest', onTest);
+wire('btnOk', onOk);
+wire('btnBrowse', browsePak);
+wire('btnInfo', onInfo);
+wire('btnList', onList);
+wire('btnUnpack', onUnpack);
+wire('btnSyntax', () => window.open('https://github.com/4sval/FModel/wiki/Settings-Explanation#endpoint-configuration', '_blank'));
+wire('btnEval', () => window.open('https://jsonpath.com/', '_blank'));
+// backend connectivity ping + auto-load saved config
 (async () => {
   if (!isTauri) {
     setStatus('Tauri backend not connected: open this UI via vrepak-gui.', false);
     return;
   }
   try {
+    const pong = await invoke('frontend_ping', {});
+    setStatus('Backend connected (' + pong + '). Configure endpoint, then press Test.', null);
+  } catch (e) { setStatus('Backend ping failed: ' + e, false); return; }
+  try {
     const cfg = await invoke('load_endpoint_config', {});
     if (cfg.endpoint) document.getElementById('endpoint').value = cfg.endpoint;
     if (cfg.expression) document.getElementById('expression').value = cfg.expression;
-    setStatus('Backend connected. Configure endpoint, then press Test.', null);
-  } catch (e) { setStatus('Backend error: ' + e, false); }
+  } catch (e) { setStatus('Load config failed: ' + e, false); }
 })();
 </script>
 </body>
