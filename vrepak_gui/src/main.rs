@@ -46,23 +46,50 @@ fn aes_from_bytes(bytes: &[u8; 32]) -> aes::Aes256 {
     aes::Aes256::new_from_slice(bytes).expect("32 bytes")
 }
 
+enum KeySource {
+    Explicit,
+    EndpointDynamic { guid: u128 },
+    EndpointMain { guid: Option<u128>, dynamics: usize },
+    None,
+}
+
+impl KeySource {
+    fn describe(&self) -> String {
+        match self {
+            KeySource::Explicit => "explicit --aes-key".to_string(),
+            KeySource::EndpointDynamic { guid } => {
+                format!("endpoint dynamic (guid {guid:032X})")
+            }
+            KeySource::EndpointMain { guid, dynamics } => match guid {
+                Some(g) => format!(
+                    "endpoint main fallback (pak guid {g:032X} not in {dynamics} dynamic keys)"
+                ),
+                None => format!(
+                    "endpoint main fallback (no guid in pak, {dynamics} dynamic keys)"
+                ),
+            },
+            KeySource::None => "none (no key supplied)".to_string(),
+        }
+    }
+}
+
 fn resolve_key_for_pak(
     pak_path: &str,
     explicit_key: Option<String>,
     endpoint: Option<String>,
     expression: Option<String>,
-) -> Result<Option<aes::Aes256>, String> {
+) -> Result<(Option<aes::Aes256>, KeySource), String> {
     if let Some(k) = explicit_key {
         if k.trim().is_empty() {
-            return Ok(None);
+            return Ok((None, KeySource::None));
         }
         return vrepak_endpoint::parse_aes_key(&k)
-            .map(|b| Some(aes_from_bytes(&b)))
+            .map(|b| (Some(aes_from_bytes(&b)), KeySource::Explicit))
             .map_err(|e| e.to_string());
     }
     if let Some(ep) = endpoint {
         if ep.trim().is_empty() {
-            return Ok(None);
+            return Ok((None, KeySource::None));
         }
         let expr = expression.unwrap_or_default();
         let cfg = vrepak_endpoint::EndpointConfig::new(&ep, &expr);
@@ -71,10 +98,25 @@ fn resolve_key_for_pak(
         let guid = File::open(pak_path)
             .ok()
             .and_then(|mut f| vrepak::PakReader::peek_encryption_guid(&mut BufReader::new(&mut f)));
+        let dynamics = resolved.dynamic_keys.len();
+        let matched = guid.and_then(|g| {
+            resolved
+                .dynamic_keys
+                .iter()
+                .find(|d| d.guid == g)
+                .map(|_| g)
+        });
         let bytes = resolved.key_for_guid(guid);
-        return Ok(Some(aes_from_bytes(&bytes)));
+        let source = match matched {
+            Some(g) => KeySource::EndpointDynamic { guid: g },
+            None => KeySource::EndpointMain {
+                guid,
+                dynamics,
+            },
+        };
+        return Ok((Some(aes_from_bytes(&bytes)), source));
     }
-    Ok(None)
+    Ok((None, KeySource::None))
 }
 
 fn pak_info_text(
@@ -83,7 +125,7 @@ fn pak_info_text(
     endpoint: Option<String>,
     expression: Option<String>,
 ) -> Result<String, String> {
-    let key = resolve_key_for_pak(pak_path, aes_key, endpoint, expression)?;
+    let (key, source) = resolve_key_for_pak(pak_path, aes_key, endpoint, expression)?;
     let mut builder = vrepak::PakBuilder::new();
     if let Some(k) = key {
         builder = builder.key(k);
@@ -91,7 +133,8 @@ fn pak_info_text(
     let mut reader = BufReader::new(File::open(pak_path).map_err(|e| e.to_string())?);
     let pak = builder.reader(&mut reader).map_err(|e| e.to_string())?;
     Ok(format!(
-        "mount point: {}\nversion: {}\nencrypted index: {}\nencryption guid: {:032X?}\n{} file entries",
+        "[key: {}]\nmount point: {}\nversion: {}\nencrypted index: {}\nencryption guid: {:032X?}\n{} file entries",
+        source.describe(),
         pak.mount_point(),
         pak.version(),
         pak.encrypted_index(),
@@ -106,7 +149,7 @@ fn pak_list_text(
     endpoint: Option<String>,
     expression: Option<String>,
 ) -> Result<String, String> {
-    let key = resolve_key_for_pak(pak_path, aes_key, endpoint, expression)?;
+    let (key, source) = resolve_key_for_pak(pak_path, aes_key, endpoint, expression)?;
     let mut builder = vrepak::PakBuilder::new();
     if let Some(k) = key {
         builder = builder.key(k);
@@ -128,17 +171,15 @@ fn pak_list_text(
         })
         .collect();
     out.sort();
+    out.insert(0, format!("[key: {}]", source.describe()));
     Ok(out.join("\n"))
 }
 
-fn pak_unpack_text(
+fn pak_unpack_with_key(
     pak_path: &str,
     out_dir: &str,
-    aes_key: Option<String>,
-    endpoint: Option<String>,
-    expression: Option<String>,
+    key: Option<aes::Aes256>,
 ) -> Result<String, String> {
-    let key = resolve_key_for_pak(pak_path, aes_key, endpoint, expression)?;
     let mut builder = vrepak::PakBuilder::new();
     if let Some(k) = key {
         builder = builder.key(k);
@@ -409,40 +450,83 @@ impl GuiApp {
         } else {
             Some(self.aes_key.clone())
         };
+        // resolve synchronously so endpoint failures are reported distinctly
+        let (key, source) = match resolve_key_for_pak(&pak_path, aes, ep, ex) {
+            Ok(v) => v,
+            Err(e) => {
+                self.pak_output = e.clone();
+                self.set_status(format!("Unpack failed [key resolution]: {e}"), StatusKind::Err);
+                return;
+            }
+        };
+        let source_str = source.describe();
         self.set_status("Unpacking…", StatusKind::Info);
-        self.spawn_job(move || match pak_unpack_text(&pak_path, &out_dir, aes, ep, ex) {
-            Ok(t) => JobResult::Pak {
-                text: t.clone(),
-                ok: true,
-                status: t,
+        self.spawn_job(
+            move || match pak_unpack_with_key(&pak_path, &out_dir, key) {
+                Ok(t) => JobResult::Pak {
+                    text: t.clone(),
+                    ok: true,
+                    status: format!("{t} [key: {source_str}]"),
+                },
+                Err(e) => JobResult::Pak {
+                    text: e.clone(),
+                    ok: false,
+                    status: format!("Unpack failed [key: {source_str}]: {e}"),
+                },
             },
-            Err(e) => JobResult::Pak {
-                text: e.clone(),
-                ok: false,
-                status: format!("Unpack failed: {e}"),
-            },
+        );
+    }
+
+    /// Single-line labeled field with an optional trailing button.
+    /// Returns true when the button was clicked.
+    /// Widths are computed from the space actually available, so the
+    /// button can never be pushed out of its column.
+    fn field_row(
+        ui: &mut egui::Ui,
+        label: &str,
+        text: &mut String,
+        hint: &str,
+        button_text: Option<&str>,
+    ) -> bool {
+        let mut clicked = false;
+        ui.horizontal(|ui| {
+            ui.label(label);
+            let reserve = if button_text.is_some() { 76.0 } else { 8.0 };
+            let w = (ui.available_width() - reserve).max(60.0);
+            ui.add(
+                egui::TextEdit::singleline(text)
+                    .hint_text(hint)
+                    .desired_width(w),
+            );
+            if let Some(b) = button_text {
+                if ui.button(b).clicked() {
+                    clicked = true;
+                }
+            }
         });
+        clicked
+    }
+
+    /// Rows of multiline code that fill the remaining panel height.
+    fn fill_rows(ui: &egui::Ui) -> usize {
+        let line_h = ui
+            .text_style_height(&egui::TextStyle::Monospace)
+            .max(10.0);
+        ((ui.available_height() - 8.0) / line_h).max(6.0) as usize
     }
 
     fn show_endpoint_tab(&mut self, ui: &mut egui::Ui) {
         ui.columns(2, |cols| {
             // left: endpoint + raw JSON
             cols[0].vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Endpoint");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.endpoint)
-                            .hint_text("https://...")
-                            .desired_width(f32::INFINITY),
-                    );
-                    if ui.button("Send").clicked() {
-                        self.on_send();
-                    }
-                });
+                if Self::field_row(ui, "Endpoint", &mut self.endpoint, "https://...", Some("Send")) {
+                    self.on_send();
+                }
+                let rows = Self::fill_rows(ui);
                 ui.add(
                     egui::TextEdit::multiline(&mut self.json_text)
                         .code_editor()
-                        .desired_rows(24)
+                        .desired_rows(rows)
                         .desired_width(f32::INFINITY),
                 );
             });
@@ -450,21 +534,20 @@ impl GuiApp {
             cols[1].vertical(|ui| {
                 ui.heading("Instruction");
                 ui.label(INSTRUCTION);
-                ui.horizontal(|ui| {
-                    ui.label("Expression");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.expression)
-                            .hint_text("$['mainKey', 'dynamicKeys']")
-                            .desired_width(f32::INFINITY),
-                    );
-                    if ui.button("Test").clicked() {
-                        self.on_test();
-                    }
-                });
+                if Self::field_row(
+                    ui,
+                    "Expression",
+                    &mut self.expression,
+                    "$['mainKey', 'dynamicKeys']",
+                    Some("Test"),
+                ) {
+                    self.on_test();
+                }
+                let rows = Self::fill_rows(ui);
                 ui.add(
                     egui::TextEdit::multiline(&mut self.expr_report)
                         .code_editor()
-                        .desired_rows(12)
+                        .desired_rows(rows)
                         .desired_width(f32::INFINITY),
                 );
             });
@@ -472,30 +555,27 @@ impl GuiApp {
     }
 
     fn show_pak_tab(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Pak file");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.pak_path)
-                    .hint_text(r"C:\games\pakchunk0.pak")
-                    .desired_width(f32::INFINITY),
-            );
-            if ui.button("…").clicked() {
-                if let Some(p) = rfd::FileDialog::new()
-                    .add_filter("Unreal pak", &["pak"])
-                    .pick_file()
-                {
-                    self.pak_path = p.to_string_lossy().into_owned();
-                }
+        if Self::field_row(
+            ui,
+            "Pak file",
+            &mut self.pak_path,
+            r"C:\games\pakchunk0.pak",
+            Some("…"),
+        ) {
+            if let Some(p) = rfd::FileDialog::new()
+                .add_filter("Unreal pak", &["pak"])
+                .pick_file()
+            {
+                self.pak_path = p.to_string_lossy().into_owned();
             }
-        });
-        ui.horizontal(|ui| {
-            ui.label("AES key (optional if endpoint set)");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.aes_key)
-                    .hint_text("0x...")
-                    .desired_width(f32::INFINITY),
-            );
-        });
+        }
+        Self::field_row(
+            ui,
+            "AES key (optional if endpoint set)",
+            &mut self.aes_key,
+            "0x...",
+            None,
+        );
         ui.horizontal(|ui| {
             if ui.button("Info").clicked() {
                 self.on_info();
@@ -507,16 +587,13 @@ impl GuiApp {
                 self.on_unpack();
             }
         });
-        egui::ScrollArea::both()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.pak_output)
-                        .code_editor()
-                        .desired_rows(20)
-                        .desired_width(f32::INFINITY),
-                );
-            });
+        let rows = Self::fill_rows(ui);
+        ui.add(
+            egui::TextEdit::multiline(&mut self.pak_output)
+                .code_editor()
+                .desired_rows(rows)
+                .desired_width(f32::INFINITY),
+        );
     }
 }
 
