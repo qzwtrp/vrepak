@@ -45,6 +45,40 @@ pub struct DynamicKey {
     pub name: Option<String>,
 }
 
+/// Where the AES key for a pak came from (for status lines and manifests).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeySource {
+    Explicit,
+    EndpointDynamic { guid: u128 },
+    EndpointMain { guid: Option<u128>, dynamics: usize },
+    None,
+}
+
+impl KeySource {
+    pub fn describe(&self) -> String {
+        match self {
+            KeySource::Explicit => "explicit --aes-key".to_string(),
+            KeySource::EndpointDynamic { guid } => {
+                format!("endpoint dynamic (guid {guid:032X})")
+            }
+            KeySource::EndpointMain { guid, dynamics } => match guid {
+                Some(g) => format!(
+                    "endpoint main fallback (pak guid {g:032X} not in {dynamics} dynamic keys)"
+                ),
+                None => format!(
+                    "endpoint main fallback (no guid in pak, {dynamics} dynamic keys)"
+                ),
+            },
+            KeySource::None => "none (no key supplied)".to_string(),
+        }
+    }
+}
+
+/// Format 256-bit key bytes as `0x`-hex for manifests and status lines.
+pub fn key_to_hex(key: &[u8; 32]) -> String {
+    format!("0x{}", hex::encode(key))
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedKeys {
     pub main_key: [u8; 32],

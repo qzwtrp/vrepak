@@ -34,7 +34,7 @@ Options:
   -a, --aes-key <AES_KEY>        256 bit AES encryption key as base64 or hex string if the pak is encrypted
       --endpoint <ENDPOINT>      Endpoint URL returning JSON with AES keys (FModel compatible). If set, keys are auto-resolved per-pak GUID (main key fallback)
       --expression <EXPRESSION>  JSONPath expression for endpoint, e.g. $['mainKey', 'dynamicKeys']. Supports up to 2 elements: main key + dynamic [{guid, key}] list [default: ]
-      --engine <ENGINE>          Engine profile for game-specific pak quirks (e.g. wuthering-waves for the modified Kuro Games engine with scrambled index entries and partially encrypted file data) [default: stock] [possible values: stock, wuthering-waves]
+      --engine <ENGINE>          Engine profile for game-specific pak quirks (e.g. wuthering-waves for the modified Kuro Games engine with scrambled index entries and partially encrypted file data) [possible values: stock, wuthering-waves]
   -h, --help                     Print help
   -V, --version                  Print version
 ```
@@ -121,18 +121,41 @@ Stock UE paks keep working with the default `stock` engine.
 Passing a key to `pack` writes an encrypted pak (AES-256 index + file data).
 The key comes from `--aes-key`, or from the endpoint's main key when
 `--endpoint` is given. `--encryption-guid` records the key GUID in the footer
-(default zeros, like Wuthering Waves paks):
+(Wuthering Waves paks use zeros):
 
 ```console
 $ vrepak --aes-key 0x1234... pack mymod --encryption-guid B8BB... --version V11 --engine wuthering-waves
-Packed 65 files to mymod.pak (encrypted, engine wuthering-waves)
+Packed 65 files to mymod.pak
 ```
 
 With `--engine wuthering-waves`, fresh entries get `--wuwa-custom-data`
-(default 2 = first 0x800 bytes encrypted: 0 means fully encrypted, 1 means
-first 0x200000 bytes, 4 means plaintext) and index records use the scrambled
-WuWa layout, so the game reads them back. Packing with the wrong CustomData
-makes those files unreadable to the game.
+(0 means fully encrypted, 1 means first 0x200000 bytes, 2 means first
+0x800 bytes, 4 means plaintext) and index records use the scrambled WuWa
+layout, so the game reads them back.
+
+### unpack manifest (`vrepak-manifest.json`)
+
+Every `unpack` also writes a `vrepak-manifest.json` next to the extracted
+files. It records exactly how each file was stored: the effective AES key
+(hex), compression method, encryption flag and WuWa `CustomData`, plus the
+pak-level engine, version, mount point and GUID. Keep it safe — it contains
+keys. Unpacking several paks into one directory merges their manifests.
+
+`pack` reads the manifest back automatically, so an unpack → pack roundtrip
+restores the original parameters per file:
+
+- key per file: `--aes-key` wins, then the manifest key, then the endpoint
+  main key;
+- compression per file: `--compression` wins, then the manifest;
+- a file is encrypted iff the manifest says so (fresh files: iff a key is
+  available) — packing an encrypted file without any key is an error;
+- CustomData per file: `--wuwa-custom-data` wins, then the manifest,
+  otherwise 2;
+- GUID: `--encryption-guid` wins, then the manifest, otherwise zeros;
+- engine: `--engine` wins, then the manifest, otherwise stock.
+
+Mount point, version and hash seed always come from flags. The manifest file
+itself is never packed.
 
 ## gui
 
@@ -140,7 +163,7 @@ makes those files unreadable to the game.
 with an *Endpoint Configuration (AES)* dialog: Endpoint + Send, instruction,
 Expression + Test, validity status bar, plus *Pak Tools* (`info` / `list` /
 `unpack`, with per-pak key diagnostics) and *Pack* (directory to encrypted or
-plain `.pak`, same keys/engine as the CLI) tabs.
+plain `.pak`, same keys/engine/manifest rules as the CLI) tabs.
 
 ```console
 $ cargo run -p vrepak_gui

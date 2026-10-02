@@ -113,6 +113,12 @@ fn test_cli_pack() {
     assert.success().stdout(formatdoc! {r#"
         Unpacked 4 files to {} from {}
     "#, out_dir.to_string_lossy(), out_pak.to_string_lossy()});
+    // unpack writes a manifest sidecar: it must parse and list all files
+    let manifest_text =
+        std::fs::read_to_string(out_dir.join("vrepak-manifest.json")).unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_text).unwrap();
+    assert_eq!(manifest["files"].as_array().unwrap().len(), 4);
+    std::fs::remove_file(out_dir.join("vrepak-manifest.json")).unwrap();
     assert!(!dir_diff::is_different("../vrepak/tests/pack/", out_dir).unwrap());
 }
 
@@ -131,6 +137,11 @@ fn test_cli_unpack() {
     assert.success().stdout(formatdoc! {r#"
         Unpacked 4 files to {} from ../vrepak/tests/packs/pack_v11.pak
     "#, &dir.path().to_string_lossy()});
+    // unpack writes a manifest sidecar next to the files
+    let manifest_text =
+        std::fs::read_to_string(dir.path().join("vrepak-manifest.json")).unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_text).unwrap();
+    assert_eq!(manifest["files"].as_array().unwrap().len(), 4);
     assert!(!dir_diff::is_different("../vrepak/tests/pack/", dir.path().join("point")).unwrap());
 
     // TODO test unpacking to non-empty directory

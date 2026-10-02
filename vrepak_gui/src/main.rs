@@ -50,50 +50,31 @@ fn aes_from_bytes(bytes: &[u8; 32]) -> aes::Aes256 {
     aes::Aes256::new_from_slice(bytes).expect("32 bytes")
 }
 
-enum KeySource {
-    Explicit,
-    EndpointDynamic { guid: u128 },
-    EndpointMain { guid: Option<u128>, dynamics: usize },
-    None,
-}
-
-impl KeySource {
-    fn describe(&self) -> String {
-        match self {
-            KeySource::Explicit => "explicit --aes-key".to_string(),
-            KeySource::EndpointDynamic { guid } => {
-                format!("endpoint dynamic (guid {guid:032X})")
-            }
-            KeySource::EndpointMain { guid, dynamics } => match guid {
-                Some(g) => format!(
-                    "endpoint main fallback (pak guid {g:032X} not in {dynamics} dynamic keys)"
-                ),
-                None => format!(
-                    "endpoint main fallback (no guid in pak, {dynamics} dynamic keys)"
-                ),
-            },
-            KeySource::None => "none (no key supplied)".to_string(),
-        }
-    }
-}
+use vrepak_endpoint::KeySource;
 
 fn resolve_key_for_pak(
     pak_path: &str,
     explicit_key: Option<String>,
     endpoint: Option<String>,
     expression: Option<String>,
-) -> Result<(Option<aes::Aes256>, KeySource), String> {
+) -> Result<(Option<aes::Aes256>, KeySource, Option<String>), String> {
     if let Some(k) = explicit_key {
         if k.trim().is_empty() {
-            return Ok((None, KeySource::None));
+            return Ok((None, KeySource::None, None));
         }
         return vrepak_endpoint::parse_aes_key(&k)
-            .map(|b| (Some(aes_from_bytes(&b)), KeySource::Explicit))
+            .map(|b| {
+                (
+                    Some(aes_from_bytes(&b)),
+                    KeySource::Explicit,
+                    Some(vrepak_endpoint::key_to_hex(&b)),
+                )
+            })
             .map_err(|e| e.to_string());
     }
     if let Some(ep) = endpoint {
         if ep.trim().is_empty() {
-            return Ok((None, KeySource::None));
+            return Ok((None, KeySource::None, None));
         }
         let expr = expression.unwrap_or_default();
         let cfg = vrepak_endpoint::EndpointConfig::new(&ep, &expr);
@@ -118,9 +99,13 @@ fn resolve_key_for_pak(
                 dynamics,
             },
         };
-        return Ok((Some(aes_from_bytes(&bytes)), source));
+        return Ok((
+            Some(aes_from_bytes(&bytes)),
+            source,
+            Some(vrepak_endpoint::key_to_hex(&bytes)),
+        ));
     }
-    Ok((None, KeySource::None))
+    Ok((None, KeySource::None, None))
 }
 
 fn pak_info_text(
@@ -130,7 +115,7 @@ fn pak_info_text(
     expression: Option<String>,
     engine: vrepak::Engine,
 ) -> Result<String, String> {
-    let (key, source) = resolve_key_for_pak(pak_path, aes_key, endpoint, expression)?;
+    let (key, source, _hex) = resolve_key_for_pak(pak_path, aes_key, endpoint, expression)?;
     let mut builder = vrepak::PakBuilder::new().engine(engine);
     if let Some(k) = key {
         builder = builder.key(k);
@@ -155,7 +140,7 @@ fn pak_list_text(
     expression: Option<String>,
     engine: vrepak::Engine,
 ) -> Result<String, String> {
-    let (key, source) = resolve_key_for_pak(pak_path, aes_key, endpoint, expression)?;
+    let (key, source, _hex) = resolve_key_for_pak(pak_path, aes_key, endpoint, expression)?;
     let mut builder = vrepak::PakBuilder::new().engine(engine);
     if let Some(k) = key {
         builder = builder.key(k);
@@ -186,6 +171,8 @@ fn pak_unpack_with_key(
     out_dir: &str,
     key: Option<aes::Aes256>,
     engine: vrepak::Engine,
+    key_hex: Option<String>,
+    key_source: Option<String>,
 ) -> Result<String, String> {
     let mut builder = vrepak::PakBuilder::new().engine(engine);
     if let Some(k) = key {
@@ -213,6 +200,32 @@ fn pak_unpack_with_key(
             .map_err(|e| e.to_string())?;
         count += 1;
     }
+    // unpack manifest sidecar (merged with any manifest already there)
+    let fresh = vrepak::PakManifest::from_reader(&pak, engine, |path| {
+        let encrypted = pak
+            .entry_info(path)
+            .map(|i| i.encrypted)
+            .unwrap_or(false);
+        if !encrypted {
+            return None;
+        }
+        key_hex
+            .clone()
+            .map(|hex| (hex, key_source.clone()))
+    });
+    let out_dir_path = PathBuf::from(out_dir);
+    let manifest_path = out_dir_path.join(vrepak::MANIFEST_FILENAME);
+    let manifest = if manifest_path.exists() {
+        let text = std::fs::read_to_string(&manifest_path).map_err(|e| e.to_string())?;
+        let mut existing = vrepak::PakManifest::from_json(&text).map_err(|e| e.to_string())?;
+        existing.merge(fresh);
+        existing
+    } else {
+        fresh
+    };
+    manifest
+        .save(&out_dir_path)
+        .map_err(|e| e.to_string())?;
     Ok(format!("Unpacked {count} files to {out_dir}"))
 }
 
@@ -222,10 +235,12 @@ fn pak_pack_text(
     mount: &str,
     version: vrepak::Version,
     compression: Option<vrepak::Compression>,
-    key: Option<aes::Aes256>,
-    guid: u128,
-    custom_data: u8,
+    explicit_bytes: Option<[u8; 32]>,
+    endpoint_bytes: Option<[u8; 32]>,
+    guid: Option<u128>,
+    custom_data: Option<u8>,
     engine: vrepak::Engine,
+    manifest: Option<vrepak::PakManifest>,
 ) -> Result<String, String> {
     fn collect_files(paths: &mut Vec<PathBuf>, dir: &std::path::Path) -> std::io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
@@ -233,7 +248,7 @@ fn pak_pack_text(
             let path = entry.path();
             if path.is_dir() {
                 collect_files(paths, &path)?;
-            } else {
+            } else if entry.file_name().to_string_lossy().as_ref() != vrepak::MANIFEST_FILENAME {
                 paths.push(path);
             }
         }
@@ -247,17 +262,37 @@ fn pak_pack_text(
     collect_files(&mut paths, input_path).map_err(|e| e.to_string())?;
     paths.sort();
 
-    let mut builder = vrepak::PakBuilder::new()
-        .engine(engine)
-        .wuwa_custom_data(custom_data);
-    if let Some(c) = compression {
-        builder = builder.compression([c]);
+    // index key: explicit key wins, then endpoint main, then the first
+    // encrypted file's key from the manifest
+    let index_key_bytes: Option<[u8; 32]> = explicit_bytes
+        .or(endpoint_bytes)
+        .or_else(|| {
+            manifest
+                .as_ref()
+                .and_then(|m| {
+                    m.files
+                        .iter()
+                        .find(|f| f.encrypted)
+                        .and_then(|f| f.key.as_deref())
+                })
+                .and_then(|hex| vrepak_endpoint::parse_aes_key(hex).ok())
+        });
+    // guid: explicit field wins, then manifest, then zeros
+    let guid: u128 = match guid {
+        Some(g) => g,
+        None => manifest
+            .as_ref()
+            .and_then(|m| m.encryption_guid.as_deref())
+            .and_then(|s| vrepak_endpoint::parse_guid(s).ok())
+            .map(|(g, _)| g)
+            .unwrap_or(0),
+    };
+    let mut builder = vrepak::PakBuilder::new().engine(engine);
+    if let Some(b) = index_key_bytes {
+        use aes::cipher::KeyInit;
+        builder = builder.key(aes::Aes256::new_from_slice(&b).expect("32-byte key"));
     }
-    let encrypting = key.is_some();
-    if let Some(k) = key {
-        builder = builder.key(k);
-    }
-    if encrypting && guid != 0 {
+    if index_key_bytes.is_some() && guid != 0 {
         builder = builder.encryption_guid(guid);
     }
     let mut pak = builder.writer(
@@ -266,22 +301,64 @@ fn pak_pack_text(
         mount.to_string(),
         Some(0),
     );
-    let entry_builder = pak.entry_builder();
+    let mut any_encrypted = false;
     for p in &paths {
         let rel = p
             .strip_prefix(input_path)
             .map_err(|e| e.to_string())?
             .to_string_lossy()
             .replace('\\', "/");
+        let meta = manifest.as_ref().and_then(|m| m.find(&rel));
+        let comp = match compression {
+            Some(c) => Some(c),
+            None => meta
+                .and_then(|m| m.compression.as_deref())
+                .map(|s| {
+                    s.parse::<vrepak::Compression>().map_err(|_| {
+                        format!("unknown compression {s:?} for {rel}")
+                    })
+                })
+                .transpose()?,
+        };
+        let kb: Option<[u8; 32]> = match explicit_bytes {
+            Some(b) => Some(b),
+            None => match meta.and_then(|m| m.key.as_deref()) {
+                Some(hex) => Some(
+                    vrepak_endpoint::parse_aes_key(hex)
+                        .map_err(|e| format!("bad key for {rel}: {e}"))?,
+                ),
+                None => endpoint_bytes,
+            },
+        };
+        let encrypt = match meta {
+            Some(m) => m.encrypted,
+            None => kb.is_some(),
+        };
+        if encrypt && kb.is_none() {
+            return Err(format!(
+                "no key for encrypted file {rel} (set AES key or endpoint)"
+            ));
+        }
+        let custom: u8 = match custom_data {
+            Some(n) => n,
+            None => meta.map(|m| m.custom_data).unwrap_or(2),
+        };
         let data = std::fs::read(p).map_err(|e| e.to_string())?;
-        let entry = entry_builder
+        let entry = vrepak::EntryBuilder::for_compression(comp)
             .build_entry(true, data)
             .map_err(|e| e.to_string())?;
-        pak.write_entry(rel, entry).map_err(|e| e.to_string())?;
+        if encrypt {
+            any_encrypted = true;
+        }
+        pak.write_entry_with_key(rel, entry, if encrypt { kb } else { None }, custom)
+            .map_err(|e| e.to_string())?;
     }
     pak.write_index().map_err(|e| e.to_string())?;
-    Ok(if encrypting {
-        format!("Packed {} files to {output} (encrypted, engine {engine})", paths.len())
+    Ok(if any_encrypted {
+        format!(
+            "Packed {} files to {output} (encrypted, engine {engine})",
+            paths.len()
+        )
     } else {
         format!("Packed {} files to {output}", paths.len())
     })
@@ -334,7 +411,7 @@ impl GuiApp {
             pack_version: vrepak::Version::V8B,
             pack_compression: None,
             pack_guid: String::new(),
-            pack_custom_data: "2".to_string(),
+            pack_custom_data: String::new(),
             pack_log: String::new(),
             pending: None,
             busy: false,
@@ -551,7 +628,7 @@ impl GuiApp {
             Some(self.aes_key.clone())
         };
         // resolve synchronously so endpoint failures are reported distinctly
-        let (key, source) = match resolve_key_for_pak(&pak_path, aes, ep, ex) {
+        let (key, source, hex) = match resolve_key_for_pak(&pak_path, aes, ep, ex) {
             Ok(v) => v,
             Err(e) => {
                 self.pak_output = e.clone();
@@ -563,7 +640,7 @@ impl GuiApp {
         let engine = self.engine;
         self.set_status("Unpacking…", StatusKind::Info);
         self.spawn_job(
-            move || match pak_unpack_with_key(&pak_path, &out_dir, key, engine) {
+            move || match pak_unpack_with_key(&pak_path, &out_dir, key, engine, hex, Some(source_str.clone())) {
                 Ok(t) => JobResult::Pak {
                     text: t.clone(),
                     ok: true,
@@ -762,7 +839,7 @@ impl GuiApp {
             ui,
             "WuWa CustomData",
             &mut self.pack_custom_data,
-            "2 (0: full, 1: 0x200000, 2: 0x800, 4: plain)",
+            "empty = auto (manifest, else 2)",
             None,
         );
         ui.horizontal(|ui| {
@@ -797,9 +874,9 @@ impl GuiApp {
             Some(self.aes_key.clone())
         };
         // resolve synchronously so endpoint failures are reported distinctly
-        let key = match aes {
+        let explicit_bytes: Option<[u8; 32]> = match aes {
             Some(k) => match vrepak_endpoint::parse_aes_key(&k) {
-                Ok(b) => Some(aes_from_bytes(&b)),
+                Ok(b) => Some(b),
                 Err(e) => {
                     self.pack_log = e.to_string();
                     self.set_status(
@@ -809,31 +886,38 @@ impl GuiApp {
                     return;
                 }
             },
-            None => match ep {
-                Some(ep) if !ep.trim().is_empty() => {
-                    let cfg = vrepak_endpoint::EndpointConfig::new(&ep, &ex.unwrap_or_default());
-                    match vrepak_endpoint::fetch_and_resolve(&cfg) {
-                        Ok((_json, resolved)) => {
-                            Some(aes_from_bytes(&resolved.key_for_guid(None)))
-                        }
-                        Err(e) => {
-                            self.pack_log = e.to_string();
-                            self.set_status(
-                                format!("Pack failed [endpoint]: {e}"),
-                                StatusKind::Err,
-                            );
-                            return;
-                        }
+            None => None,
+        };
+        let endpoint_bytes: Option<[u8; 32]> = match ep {
+            Some(ep) if !ep.trim().is_empty() => {
+                let cfg = vrepak_endpoint::EndpointConfig::new(&ep, &ex.unwrap_or_default());
+                match vrepak_endpoint::fetch_and_resolve(&cfg) {
+                    Ok((_json, resolved)) => Some(resolved.key_for_guid(None)),
+                    Err(e) => {
+                        self.pack_log = e.to_string();
+                        self.set_status(
+                            format!("Pack failed [endpoint]: {e}"),
+                            StatusKind::Err,
+                        );
+                        return;
                     }
                 }
-                _ => None,
-            },
+            }
+            _ => None,
         };
-        let guid = if self.pack_guid.trim().is_empty() {
-            0
+        let manifest = vrepak::PakManifest::load_if_present(std::path::Path::new(&input));
+        if let Some(m) = &manifest {
+            self.pack_log = format!(
+                "Using {} ({} files) for per-file settings.\n",
+                vrepak::MANIFEST_FILENAME,
+                m.files.len()
+            );
+        }
+        let guid: Option<u128> = if self.pack_guid.trim().is_empty() {
+            None
         } else {
             match vrepak_endpoint::parse_guid(&self.pack_guid) {
-                Ok((g, _)) => g,
+                Ok((g, _)) => Some(g),
                 Err(e) => {
                     self.pack_log = e.to_string();
                     self.set_status(
@@ -844,12 +928,17 @@ impl GuiApp {
                 }
             }
         };
-        let custom_data: u8 = match self.pack_custom_data.trim().parse() {
-            Ok(n) => n,
-            Err(_) => {
-                self.pack_log = "CustomData must be a number (0, 1, 2 or 4)".to_string();
-                self.set_status("Pack failed [custom data]", StatusKind::Err);
-                return;
+        let custom_data: Option<u8> = if self.pack_custom_data.trim().is_empty() {
+            None
+        } else {
+            match self.pack_custom_data.trim().parse() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    self.pack_log =
+                        "CustomData must be a number (0, 1, 2 or 4)".to_string();
+                    self.set_status("Pack failed [custom data]", StatusKind::Err);
+                    return;
+                }
             }
         };
         let mount = self.pack_mount.clone();
@@ -864,10 +953,12 @@ impl GuiApp {
                 &mount,
                 version,
                 compression,
-                key,
+                explicit_bytes,
+                endpoint_bytes,
                 guid,
                 custom_data,
                 engine,
+                manifest,
             ) {
                 Ok(t) => JobResult::Pack {
                     text: t.clone(),

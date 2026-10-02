@@ -1,0 +1,3 @@
+# Byte-exact test fixtures: unpack/pack tests compare file contents
+# verbatim, so never convert line endings on any platform.
+/vrepak/tests/pack/** -text

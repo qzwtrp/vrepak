@@ -4298,6 +4298,8 @@ dependencies = [
  "lz4_flex",
  "oodle_loader",
  "paste",
+ "serde",
+ "serde_json",
  "sha1",
  "strum 0.27.2",
  "thiserror 2.0.17",

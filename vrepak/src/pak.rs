@@ -108,6 +108,16 @@ pub struct PakReader {
     engine: super::Engine,
 }
 
+/// Per-file storage metadata (for manifests and diagnostics).
+#[derive(Debug, Clone)]
+pub struct EntryInfo {
+    pub compression: Option<Compression>,
+    pub encrypted: bool,
+    pub custom_data: u8,
+    pub compressed_size: u64,
+    pub uncompressed_size: u64,
+}
+
 #[derive(Debug)]
 pub struct PakWriter<W: Write + Seek> {
     pak: Pak,
@@ -284,6 +294,20 @@ impl PakReader {
         self.pak.index.entries().keys().cloned().collect()
     }
 
+    /// Per-file storage metadata for manifests/diagnostics.
+    pub fn entry_info(&self, path: &str) -> Option<EntryInfo> {
+        self.pak.index.entries().get(path).map(|e| EntryInfo {
+            compression: e
+                .compression_slot
+                .and_then(|slot| self.pak.compression.get(slot as usize).cloned())
+                .flatten(),
+            encrypted: e.is_encrypted(),
+            custom_data: e.custom_data,
+            compressed_size: e.compressed,
+            uncompressed_size: e.uncompressed,
+        })
+    }
+
     /// Peek encryption GUID without needing the AES key (footer is not encrypted).
     /// Tries all known versions, returns GUID if footer found.
     pub fn peek_encryption_guid<R: Read + Seek>(reader: &mut R) -> Option<u128> {
@@ -351,8 +375,15 @@ impl<W: Write + Seek> PakWriter<W> {
         encryption_guid: Option<u128>,
         wuwa_custom_data: u8,
     ) -> Self {
+        let mut pak = Pak::new(version, mount_point, path_hash_seed);
+        // a fresh pack encrypts its index iff a key was provided
+        #[cfg(feature = "encryption")]
+        {
+            pak.encrypted_index = matches!(key, super::Key::Some(_));
+        }
+        pak.encryption_guid = encryption_guid;
         PakWriter {
-            pak: Pak::new(version, mount_point, path_hash_seed),
+            pak,
             writer,
             key,
             allowed_compression,
@@ -432,6 +463,14 @@ impl<W: Write + Seek> PakWriter<W> {
         }
     }
 
+    /// Entry builder forcing one compression method (or none), for per-file
+    /// manifest settings on pack. `None` means store uncompressed.
+    pub fn entry_builder_for(&self, compression: Option<Compression>) -> EntryBuilder {
+        EntryBuilder {
+            allowed_compression: compression.into_iter().collect(),
+        }
+    }
+
     pub fn write_entry<D: AsRef<[u8]>>(
         &mut self,
         path: String,
@@ -461,13 +500,57 @@ impl<W: Write + Seek> PakWriter<W> {
 
         Ok(())
     }
-    pub fn write_index(mut self) -> Result<W, super::Error> {
-        self.pak.write(
-            &mut self.writer,
-            &self.key,
-            self.encryption_guid,
-            self.engine,
+
+    /// Like [`PakWriter::write_entry`], but with a per-file key and WuWa
+    /// `CustomData` (for manifest-driven repacks). `key_bytes: None` writes
+    /// a plaintext entry (the `custom_data` byte is still recorded for WuWa).
+    pub fn write_entry_with_key<D: AsRef<[u8]>>(
+        &mut self,
+        path: String,
+        partial_entry: PartialEntry<D>,
+        key_bytes: Option<[u8; 32]>,
+        custom_data: u8,
+    ) -> Result<(), Error> {
+        let stream_position = self.writer.stream_position()?;
+        let mut entry = partial_entry.build_entry(
+            self.pak.version,
+            &mut self.pak.compression,
+            stream_position,
         )?;
+        #[cfg(feature = "encryption")]
+        let owned_key: super::Key = match key_bytes {
+            Some(bytes) => {
+                use aes::cipher::KeyInit;
+                super::Key::Some(
+                    aes::Aes256::new_from_slice(&bytes).expect("per-file key is 32 bytes"),
+                )
+            }
+            None => super::Key::None,
+        };
+        #[cfg(not(feature = "encryption"))]
+        let owned_key: super::Key = {
+            if key_bytes.is_some() {
+                return Err(super::Error::Encryption);
+            }
+            super::Key::None
+        };
+        let crypt = Self::crypt(&owned_key, self.engine, custom_data)?;
+        #[cfg(feature = "encryption")]
+        if matches!(owned_key, super::Key::Some(_)) {
+            entry.flags |= 1;
+        }
+        entry.custom_data = custom_data;
+        entry.write(
+            &mut self.writer,
+            self.pak.version,
+            crate::entry::EntryLocation::Data,
+        )?;
+        self.pak.index.add_entry(path, entry);
+        partial_entry.write_data(&mut self.writer, crypt)?;
+        Ok(())
+    }
+    pub fn write_index(mut self) -> Result<W, super::Error> {
+        self.pak.write(&mut self.writer, &self.key, self.engine)?;
         Ok(self.writer)
     }
 }
@@ -484,6 +567,13 @@ pub struct EntryBuilder {
     allowed_compression: Vec<Compression>,
 }
 impl EntryBuilder {
+    /// Builder forcing one compression method (or none), for per-file
+    /// manifest settings on pack.
+    pub fn for_compression(compression: Option<Compression>) -> Self {
+        EntryBuilder {
+            allowed_compression: compression.into_iter().collect(),
+        }
+    }
     /// Builds an entry in memory (compressed if requested) which must be written out later
     pub fn build_entry<D: AsRef<[u8]> + Send + Sync>(
         &self,
@@ -664,17 +754,11 @@ impl Pak {
         &self,
         writer: &mut W,
         #[allow(unused)] key: &super::Key,
-        encryption_uuid: Option<u128>,
         engine: super::Engine,
     ) -> Result<(), super::Error> {
-        #[cfg(feature = "encryption")]
-        let encrypting = matches!(key, super::Key::Some(_));
-        #[cfg(not(feature = "encryption"))]
-        let encrypting = {
-            let _ = key;
-            let _ = encryption_uuid;
-            false
-        };
+        // Preserve the source pak's index-encryption state on rewrite; fresh
+        // packs opt in via the builder key.
+        let encrypting = self.encrypted_index;
         let index_offset = writer.stream_position()?;
 
         let mut index_buf = vec![];
@@ -816,8 +900,8 @@ impl Pak {
         }
 
         let footer = super::footer::Footer {
-            encryption_uuid,
-            encrypted: encrypting,
+            encryption_uuid: self.encryption_guid,
+            encrypted: self.encrypted_index,
             magic: super::MAGIC,
             version: self.version,
             version_major: self.version.version_major(),

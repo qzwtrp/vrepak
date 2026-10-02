@@ -4,9 +4,10 @@ mod entry;
 mod error;
 mod ext;
 mod footer;
+mod manifest;
 mod pak;
 
-pub use {data::PartialEntry, error::*, pak::*};
+pub use {data::PartialEntry, error::*, manifest::*, pak::*};
 
 pub const MAGIC: u32 = 0x5A6F12E1;
 
