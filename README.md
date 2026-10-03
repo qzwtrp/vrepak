@@ -198,7 +198,7 @@ $ cargo run -p vrepak_gui
 | Crate | Description |
 |-------|-------------|
 | `vrepak` | Core library: reading/writing `.pak` (fork of [`repak`](https://github.com/trumank/repak)) |
-| `vrepak_cli` | `vrepak` binary: `info` / `list` / `hash-list` / `unpack` / `pack` / `get` / `endpoint-test` |
+| `vrepak_cli` | `vrepak` binary: `info` / `list` / `hash-list` / `unpack` / `pack` / `get` / `diff` / `endpoint-test` |
 | `vrepak_endpoint` | Endpoint configuration (AES): fetch JSON + JSONPath evaluation + key validation (FModel compatible) |
 | `vrepak_gui` | `vrepak-gui` binary: native egui GUI |
 | `oodle_loader` | Optional Oodle loader (unchanged from upstream) |
