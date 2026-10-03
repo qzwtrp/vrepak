@@ -38,6 +38,12 @@ pub struct PakManifest {
     pub mount_point: String,
     /// footer encryption guid as 32 hex chars, if any
     pub encryption_guid: Option<String>,
+    /// whether the index itself was encrypted (missing in old manifests)
+    #[serde(default)]
+    pub index_encrypted: bool,
+    /// key the index was encrypted with, as `0x`-hex (missing in old manifests)
+    #[serde(default)]
+    pub index_key: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<FileMeta>,
 }
@@ -48,6 +54,8 @@ impl PakManifest {
         pak_version: crate::Version,
         mount_point: &str,
         encryption_guid: Option<u128>,
+        index_encrypted: bool,
+        index_key: Option<String>,
     ) -> Self {
         Self {
             format: MANIFEST_FORMAT,
@@ -55,6 +63,8 @@ impl PakManifest {
             pak_version: pak_version.to_string(),
             mount_point: mount_point.to_string(),
             encryption_guid: encryption_guid.map(|g| format!("{g:032X}")),
+            index_encrypted,
+            index_key: index_key.filter(|_| index_encrypted),
             files: vec![],
         }
     }
@@ -80,21 +90,27 @@ impl PakManifest {
         self.files.iter().find(|f| f.path == path)
     }
 
-    /// Build a manifest from an open pak. `key_hex_for` maps a pak-relative
-    /// file path to the effective key (`0x`-hex) used for it, if any.
+    /// Build a manifest from an open pak. `index_key_hex` is the `0x`-hex key
+    /// the index was encrypted with (if it was); `key_hex_for` maps a
+    /// pak-relative file path to the effective key (`0x`-hex) used for it,
+    /// if any.
     pub fn from_reader<F>(
         reader: &crate::PakReader,
         engine: crate::Engine,
+        index_key_hex: Option<String>,
         mut key_hex_for: F,
     ) -> Self
     where
         F: FnMut(&str) -> Option<(String, Option<String>)>,
     {
+        let index_encrypted = reader.encrypted_index();
         let mut manifest = Self::new(
             engine,
             reader.version(),
             reader.mount_point(),
             reader.encryption_guid(),
+            index_encrypted,
+            index_key_hex,
         );
         let mut files = reader.files();
         files.sort();
@@ -134,6 +150,8 @@ impl PakManifest {
         self.pak_version = other.pak_version;
         self.mount_point = other.mount_point;
         self.encryption_guid = other.encryption_guid;
+        self.index_encrypted = other.index_encrypted;
+        self.index_key = other.index_key;
     }
 
     pub fn load_if_present(dir: &std::path::Path) -> Option<Self> {
@@ -162,6 +180,8 @@ mod test {
             crate::Version::V11,
             "../../../",
             Some(0xB8BBEF2CF08D46FAAD154EA2B0F2856F),
+            true,
+            Some("0x00".to_string()),
         );
         m.files.push(FileMeta {
             path: "a/b.uasset".to_string(),
@@ -181,5 +201,27 @@ mod test {
         assert!(back.find("a/b.uasset").is_some());
         assert!(back.find("nope").is_none());
         assert!(PakManifest::from_json("{\"format\": 999}").is_err());
+    }
+
+    #[test]
+    fn manifest_index_fields() {
+        let m = PakManifest::new(
+            crate::Engine::Stock,
+            crate::Version::V11,
+            "../../../",
+            None,
+            true,
+            Some("0x00".to_string()),
+        );
+        let back = PakManifest::from_json(&m.to_json_pretty().unwrap()).unwrap();
+        assert!(back.index_encrypted);
+        assert_eq!(back.index_key.as_deref(), Some("0x00"));
+        // manifests written before these fields existed still parse
+        let old = PakManifest::from_json(
+            r#"{"format":1,"engine":"stock","pak_version":"V11","mount_point":"../../../","encryption_guid":null,"files":[]}"#,
+        )
+        .unwrap();
+        assert!(!old.index_encrypted);
+        assert_eq!(old.index_key, None);
     }
 }

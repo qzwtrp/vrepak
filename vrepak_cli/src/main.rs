@@ -116,6 +116,11 @@ struct ActionPack {
     #[arg(long)]
     wuwa_custom_data: Option<u8>,
 
+    /// Force the packed index to be encrypted (true) or plaintext (false).
+    /// When absent, the unpack manifest decides, otherwise a key being set does.
+    #[arg(long)]
+    encrypt_index: Option<bool>,
+
     /// Verbose
     #[arg(short, long, default_value = "false")]
     verbose: bool,
@@ -781,7 +786,11 @@ fn unpack_with_keys(per_file_keys: Vec<Option<ResolvedPakKey>>, engine: vrepak::
         // unpack manifest: how each file was stored (key, compression,
         // encryption, CustomData), so `pack` can restore it exactly.
         // Merges with a manifest already present in the output dir.
-        let fresh = vrepak::PakManifest::from_reader(&pak, engine, |path| {
+        let fresh = vrepak::PakManifest::from_reader(
+            &pak,
+            engine,
+            resolved.as_ref().map(|r| r.hex.clone()),
+            |path| {
             let encrypted = pak
                 .entry_info(path)
                 .map(|i| i.encrypted)
@@ -914,8 +923,20 @@ fn pack(
         })
         .and_then(|hex| vrepak_endpoint::parse_aes_key(hex).ok())
     });
+    // index encryption: explicit flag wins, then the manifest, otherwise
+    // whatever a key being set implies (encrypts fresh packs with a key,
+    // keeps plaintext ones plaintext on keyless rewrite flows)
+    let index_encrypted = match args.encrypt_index {
+        Some(b) => b,
+        None => manifest
+            .as_ref()
+            .map(|m| m.index_encrypted)
+            .unwrap_or(index_key_bytes.is_some()),
+    };
 
-    let mut builder = vrepak::PakBuilder::new().engine(engine);
+    let mut builder = vrepak::PakBuilder::new()
+        .engine(engine)
+        .encrypt_index(index_encrypted);
     if let Some(b) = index_key_bytes {
         use aes::cipher::KeyInit;
         builder = builder.key(
@@ -924,7 +945,16 @@ fn pack(
     }
     // record a guid only on encrypted paks (an unencrypted pak with a guid
     // would mislead readers into requesting a key)
-    if index_key_bytes.is_some() && guid != 0 {
+    let manifest_any_encrypted = manifest
+        .as_ref()
+        .map(|m| m.files.iter().any(|f| f.encrypted))
+        .unwrap_or(false);
+    if guid != 0
+        && (index_encrypted
+            || explicit_bytes.is_some()
+            || endpoint_bytes.is_some()
+            || manifest_any_encrypted)
+    {
         builder = builder.encryption_guid(guid);
     }
     let mut pak = builder.writer(

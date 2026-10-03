@@ -201,7 +201,7 @@ fn pak_unpack_with_key(
         count += 1;
     }
     // unpack manifest sidecar (merged with any manifest already there)
-    let fresh = vrepak::PakManifest::from_reader(&pak, engine, |path| {
+    let fresh = vrepak::PakManifest::from_reader(&pak, engine, key_hex.clone(), |path| {
         let encrypted = pak
             .entry_info(path)
             .map(|i| i.encrypted)
@@ -388,7 +388,15 @@ fn pak_pack_text(
             .map(|(g, _)| g)
             .unwrap_or(0),
     };
-    let mut builder = vrepak::PakBuilder::new().engine(engine);
+    // index encryption: reproduce the manifest state, otherwise derive
+    // from key presence (encrypt fresh packs that have a key)
+    let index_encrypted = manifest
+        .as_ref()
+        .map(|m| m.index_encrypted)
+        .unwrap_or(index_key_bytes.is_some());
+    let mut builder = vrepak::PakBuilder::new()
+        .engine(engine)
+        .encrypt_index(index_encrypted);
     if let Some(b) = index_key_bytes {
         use aes::cipher::KeyInit;
         builder = builder.key(aes::Aes256::new_from_slice(&b).expect("32-byte key"));

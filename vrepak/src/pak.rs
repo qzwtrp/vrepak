@@ -23,6 +23,10 @@ pub struct PakBuilder {
     engine: super::Engine,
     encryption_guid: Option<u128>,
     wuwa_custom_data: u8,
+    /// Force index encryption on/off. `None` (default) derives it from key
+    /// presence. (`into_pakwriter` rewrite flows always preserve the source
+    /// pak's own flag instead.)
+    encrypt_index: Option<bool>,
 }
 
 impl Default for PakBuilder {
@@ -40,6 +44,7 @@ impl PakBuilder {
             encryption_guid: None,
             // most Wuthering Waves entries use CustomData 2 (first 0x800 bytes encrypted)
             wuwa_custom_data: 2,
+            encrypt_index: None,
         }
     }
     #[cfg(feature = "encryption")]
@@ -70,6 +75,13 @@ impl PakBuilder {
         self.wuwa_custom_data = custom_data;
         self
     }
+    /// Force the packed index to be encrypted or plaintext, e.g. to
+    /// reproduce a source pak's exact state from its unpack manifest.
+    /// By default the index is encrypted iff a key is set.
+    pub fn encrypt_index(mut self, encrypt: bool) -> Self {
+        self.encrypt_index = Some(encrypt);
+        self
+    }
     pub fn reader<R: Read + Seek>(self, reader: &mut R) -> Result<PakReader, super::Error> {
         PakReader::new_any_inner(reader, self.key, self.engine)
     }
@@ -97,6 +109,7 @@ impl PakBuilder {
             self.engine,
             self.encryption_guid,
             self.wuwa_custom_data,
+            self.encrypt_index,
         )
     }
 }
@@ -374,12 +387,22 @@ impl<W: Write + Seek> PakWriter<W> {
         engine: super::Engine,
         encryption_guid: Option<u128>,
         wuwa_custom_data: u8,
+        encrypt_index: Option<bool>,
     ) -> Self {
         let mut pak = Pak::new(version, mount_point, path_hash_seed);
-        // a fresh pack encrypts its index iff a key was provided
+        // a fresh pack encrypts its index iff a key was provided, unless
+        // overridden explicitly (rewrite flows preserve the source instead)
         #[cfg(feature = "encryption")]
         {
-            pak.encrypted_index = matches!(key, super::Key::Some(_));
+            pak.encrypted_index = encrypt_index.unwrap_or(matches!(key, super::Key::Some(_)));
+        }
+        #[cfg(not(feature = "encryption"))]
+        {
+            let _ = encrypt_index;
+        }
+        #[cfg(not(feature = "encryption"))]
+        {
+            let _ = encrypt_index;
         }
         pak.encryption_guid = encryption_guid;
         PakWriter {
@@ -1112,6 +1135,59 @@ mod test {
                 let data = pak.get(&f, &mut reader).unwrap();
                 (f, data)
             })
+            .collect();
+        assert_eq!(back, expected);
+    }
+
+    #[test]
+    fn test_wuwa_plaintext_index_encrypted_data() {
+        // the Wuthering Waves layout from the wild: plaintext index with
+        // partially encrypted file data. Packing must NOT encrypt the index
+        // just because a key is set when explicitly disabled.
+        let payload: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
+        let files = vec![("w.txt", payload)];
+        let mut pak = PakBuilder::new()
+            .key(test_key())
+            .engine(crate::Engine::WutheringWaves)
+            .wuwa_custom_data(2)
+            .encrypt_index(false)
+            .writer(
+                io::Cursor::new(vec![]),
+                crate::Version::V11,
+                "../../../".to_string(),
+                Some(0),
+            );
+        for (path, data) in &files {
+            pak.write_file(path, false, data).unwrap();
+        }
+        let bytes = pak.write_index().unwrap().into_inner();
+        // index parses even without a key...
+        let mut reader = io::Cursor::new(&bytes[..]);
+        let plain = PakBuilder::new()
+            .engine(crate::Engine::WutheringWaves)
+            .reader(&mut reader)
+            .unwrap();
+        assert!(!plain.encrypted_index());
+        assert_eq!(plain.files(), vec!["w.txt".to_string()]);
+        // ...and data decrypts with the key
+        let mut reader = io::Cursor::new(&bytes[..]);
+        let pak = PakBuilder::new()
+            .key(test_key())
+            .engine(crate::Engine::WutheringWaves)
+            .reader(&mut reader)
+            .unwrap();
+        assert!(!pak.encrypted_index());
+        let back: Vec<(String, Vec<u8>)> = pak
+            .files()
+            .into_iter()
+            .map(|f| {
+                let data = pak.get(&f, &mut reader).unwrap();
+                (f, data)
+            })
+            .collect();
+        let expected: Vec<(String, Vec<u8>)> = files
+            .iter()
+            .map(|(p, d)| (p.to_string(), d.clone()))
             .collect();
         assert_eq!(back, expected);
     }

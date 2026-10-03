@@ -157,8 +157,9 @@ layout, so the game reads them back.
 Every `unpack` also writes a `vrepak-manifest.json` next to the extracted
 files. It records exactly how each file was stored: the effective AES key
 (hex), compression method, encryption flag and WuWa `CustomData`, plus the
-pak-level engine, version, mount point and GUID. Keep it safe — it contains
-keys. Unpacking several paks into one directory merges their manifests.
+pak-level engine, version, mount point, GUID — and whether the *index itself*
+was encrypted plus its key. Keep it safe — it contains keys. Unpacking
+several paks into one directory merges their manifests.
 
 `pack` reads the manifest back automatically, so an unpack → pack roundtrip
 restores the original parameters per file:
@@ -171,7 +172,11 @@ restores the original parameters per file:
 - CustomData per file: `--wuwa-custom-data` wins, then the manifest,
   otherwise 2;
 - GUID: `--encryption-guid` wins, then the manifest, otherwise zeros;
-- engine: `--engine` wins, then the manifest, otherwise stock.
+- engine: `--engine` wins, then the manifest, otherwise stock;
+- index encryption: `--encrypt-index=true/false` wins, then the manifest's
+  `index_encrypted`, otherwise a key being set. Many game paks (e.g. Wuthering
+  Waves) have a *plaintext* index with encrypted file data — encrypting the
+  index on repack makes the game reject the pak, so the manifest preserves it.
 
 Mount point, version and hash seed always come from flags. The manifest file
 itself is never packed.
