@@ -150,7 +150,9 @@ Packed 65 files to mymod.pak
 With `--engine wuthering-waves`, fresh entries get `--wuwa-custom-data`
 (0 means fully encrypted, 1 means first 0x200000 bytes, 2 means first
 0x800 bytes, 4 means plaintext) and index records use the scrambled WuWa
-layout, so the game reads them back.
+layout, so the game reads them back. The footer is stamped with pak version
+12 (Kuro's modified UE 4.26) instead of the stock 11 — games reject
+version-11 footers even when the index content is V11-compatible.
 
 ### unpack manifest (`vrepak-manifest.json`)
 

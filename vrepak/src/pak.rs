@@ -99,6 +99,14 @@ impl PakBuilder {
         mount_point: String,
         path_hash_seed: Option<u64>,
     ) -> PakWriter<W> {
+        // Kuro Games' modified UE 4.26 stamps pak version 12 in the footer
+        // (the index content stays V11-compatible); games reject footers
+        // with the stock 11, so V11 requests become V12 under the WuWa
+        // engine. Explicit lower versions and the stock engine are untouched.
+        let version = match (self.engine, version) {
+            (super::Engine::WutheringWaves, super::Version::V11) => super::Version::V12,
+            _ => version,
+        };
         PakWriter::new_inner(
             writer,
             self.key,
@@ -1190,6 +1198,42 @@ mod test {
             .map(|(p, d)| (p.to_string(), d.clone()))
             .collect();
         assert_eq!(back, expected);
+    }
+
+    #[test]
+    fn test_wuwa_writer_stamps_v12() {
+        // Kuro's engine requires pak version 12 in the footer; a V11
+        // request under the WuWa engine becomes V12, while the stock
+        // engine keeps writing stock 11.
+        for (engine, requested, expected) in [
+            (
+                crate::Engine::WutheringWaves,
+                crate::Version::V11,
+                crate::Version::V12,
+            ),
+            (
+                crate::Engine::Stock,
+                crate::Version::V11,
+                crate::Version::V11,
+            ),
+        ] {
+            let mut pak = PakBuilder::new().engine(engine).writer(
+                io::Cursor::new(vec![]),
+                requested,
+                "../../../".to_string(),
+                Some(0),
+            );
+            pak.write_file("a.txt", false, b"wuwa version stamp".as_slice())
+                .unwrap();
+            let bytes = pak.write_index().unwrap().into_inner();
+            let mut reader = io::Cursor::new(&bytes[..]);
+            let back = PakBuilder::new().engine(engine).reader(&mut reader).unwrap();
+            assert_eq!(back.version(), expected);
+            assert_eq!(
+                back.get("a.txt", &mut reader).unwrap(),
+                b"wuwa version stamp"
+            );
+        }
     }
 
     #[test]

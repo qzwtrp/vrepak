@@ -38,6 +38,10 @@ pub enum Version {
     V9,
     V10,
     V11,
+    /// Kuro Games' modified UE 4.26 (Wuthering Waves): V11-compatible
+    /// index content, but pak version 12 stamped in the footer.
+    /// Requested implicitly via the WuWa engine, never stock behavior.
+    V12,
 }
 
 #[repr(u32)]
@@ -58,6 +62,7 @@ pub enum VersionMajor {
     FrozenIndex,           // v9 frozen index byte included
     PathHashIndex,         // v10
     Fnv64BugFix,           // v11
+    KuroV12,               // v12: Kuro Games' modified UE 4.26 (Wuthering Waves)
 }
 
 // strum shouldn't need to be installed by users
@@ -108,6 +113,7 @@ impl Version {
             Version::V9 => VersionMajor::FrozenIndex,
             Version::V10 => VersionMajor::PathHashIndex,
             Version::V11 => VersionMajor::Fnv64BugFix,
+            Version::V12 => VersionMajor::KuroV12,
         }
     }
 }
