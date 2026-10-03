@@ -140,6 +140,25 @@ struct ActionGet {
     strip_prefix: String,
 }
 
+#[derive(Parser, Debug)]
+struct ActionDiff {
+    /// First .pak path
+    #[arg(index = 1)]
+    input1: String,
+
+    /// Second .pak path
+    #[arg(index = 2)]
+    input2: String,
+
+    /// Prefix to strip from entry path
+    #[arg(short, long, default_value = "../../../")]
+    strip_prefix: String,
+
+    /// Only compare file lists, skip content hashing
+    #[arg(long, default_value = "false")]
+    names_only: bool,
+}
+
 #[derive(Subcommand, Debug)]
 enum Action {
     /// Print .pak info
@@ -154,6 +173,8 @@ enum Action {
     Pack(ActionPack),
     /// Reads a single file to stdout
     Get(ActionGet),
+    /// Compare two .pak files and list differences (exit code 1 when different)
+    Diff(ActionDiff),
     /// Test endpoint configuration (AES) - FModel compatible
     EndpointTest(ActionEndpointTest),
 }
@@ -320,6 +341,11 @@ fn main() -> Result<(), vrepak::Error> {
             let k = resolve_for_file(&action.input).map(|k| k.cipher);
             get(k, engine, action)
         }
+        Action::Diff(action) => {
+            let k1 = resolve_for_file(&action.input1).map(|k| k.cipher);
+            let k2 = resolve_for_file(&action.input2).map(|k| k.cipher);
+            diff(k1, k2, engine, action)
+        }
         Action::EndpointTest(action) => endpoint_test(action),
     }
 }
@@ -466,6 +492,140 @@ fn hash_list(aes_key: Option<aes::Aes256>, engine: vrepak::Engine, action: Actio
         println!("{} {}", hex::encode(hash), file);
     }
 
+    Ok(())
+}
+
+fn diff(
+    aes_key1: Option<aes::Aes256>,
+    aes_key2: Option<aes::Aes256>,
+    engine: vrepak::Engine,
+    action: ActionDiff,
+) -> Result<(), vrepak::Error> {
+    fn open(
+        input: &str,
+        aes_key: Option<aes::Aes256>,
+        engine: vrepak::Engine,
+    ) -> Result<vrepak::PakReader, vrepak::Error> {
+        let mut builder = vrepak::PakBuilder::new().engine(engine);
+        if let Some(aes_key) = aes_key {
+            builder = builder.key(aes_key);
+        }
+        builder.reader(&mut BufReader::new(File::open(input)?))
+    }
+    fn stripped(
+        pak: &vrepak::PakReader,
+        strip_prefix: &str,
+    ) -> Result<BTreeMap<String, (String, u64)>, vrepak::Error> {
+        let mount_point = PathBuf::from(pak.mount_point());
+        let prefix = Path::new(strip_prefix);
+        let mut map = BTreeMap::new();
+        for f in pak.files() {
+            let full = mount_point.join(&f);
+            let stripped = full
+                .strip_prefix(prefix)
+                .map_err(|_| vrepak::Error::PrefixMismatch {
+                    path: full.to_string_lossy().to_string(),
+                    prefix: prefix.to_string_lossy().to_string(),
+                })?
+                .to_slash_lossy()
+                .into_owned();
+            let size = pak
+                .entry_info(&f)
+                .map(|i| i.uncompressed_size)
+                .unwrap_or(0);
+            map.insert(stripped, (f, size));
+        }
+        Ok(map)
+    }
+    fn hash_one(
+        pak: &vrepak::PakReader,
+        input: &str,
+        paths: &[String],
+    ) -> Result<BTreeMap<String, Vec<u8>>, vrepak::Error> {
+        let hashes: std::sync::Arc<std::sync::Mutex<BTreeMap<String, Vec<u8>>>> =
+            Default::default();
+        paths.par_iter().try_for_each_init(
+            || (hashes.clone(), File::open(input)),
+            |(hashes, file), path| -> Result<(), vrepak::Error> {
+                use sha2::Digest;
+
+                let mut hasher = sha2::Sha256::new();
+                pak.read_file(
+                    path,
+                    &mut BufReader::new(file.as_ref().unwrap()),
+                    &mut hasher,
+                )?;
+                let hash = hasher.finalize();
+                hashes
+                    .lock()
+                    .unwrap()
+                    .insert(path.clone(), hash.to_vec());
+                Ok(())
+            },
+        )?;
+        Ok(hashes.lock().unwrap().clone())
+    }
+
+    let pak1 = open(&action.input1, aes_key1, engine)?;
+    let pak2 = open(&action.input2, aes_key2, engine)?;
+    let map1 = stripped(&pak1, &action.strip_prefix)?;
+    let map2 = stripped(&pak2, &action.strip_prefix)?;
+
+    println!("--- {} ({}, {} files)", action.input1, pak1.version(), map1.len());
+    println!("+++ {} ({}, {} files)", action.input2, pak2.version(), map2.len());
+
+    let only1: Vec<&String> = map1.keys().filter(|k| !map2.contains_key(*k)).collect();
+    let only2: Vec<&String> = map2.keys().filter(|k| !map1.contains_key(*k)).collect();
+    println!("Only in {} ({}):", action.input1, only1.len());
+    for f in &only1 {
+        println!("  {f}");
+    }
+    println!("Only in {} ({}):", action.input2, only2.len());
+    for f in &only2 {
+        println!("  {f}");
+    }
+
+    let common: Vec<&String> = map1.keys().filter(|k| map2.contains_key(*k)).collect();
+    let mut differing: Vec<(String, String)> = vec![];
+    let mut identical = 0;
+    if action.names_only {
+        identical = common.len();
+    } else {
+        // same-size files go to content hashing; size mismatches are decisive
+        let mut pending: Vec<(&String, &String, &String, u64)> = vec![];
+        for f in &common {
+            let (p1, size1) = &map1[*f];
+            let (p2, size2) = &map2[*f];
+            if size1 != size2 {
+                differing.push(((*f).clone(), format!("{size1} -> {size2} bytes")));
+            } else {
+                pending.push((*f, p1, p2, *size1));
+            }
+        }
+        if !pending.is_empty() {
+            let to_hash1: Vec<String> = pending.iter().map(|(_, p1, _, _)| (*p1).clone()).collect();
+            let to_hash2: Vec<String> = pending.iter().map(|(_, _, p2, _)| (*p2).clone()).collect();
+            let h1 = hash_one(&pak1, &action.input1, &to_hash1)?;
+            let h2 = hash_one(&pak2, &action.input2, &to_hash2)?;
+            for (f, p1, p2, size) in pending {
+                if h1[p1] != h2[p2] {
+                    differing.push((f.clone(), format!("{size} bytes, content differs")));
+                } else {
+                    identical += 1;
+                }
+            }
+        }
+    }
+    differing.sort();
+    println!("Differing ({}):", differing.len());
+    for (f, detail) in &differing {
+        println!("  {f} ({detail})");
+    }
+    println!("Identical files: {identical}");
+
+    if !only1.is_empty() || !only2.is_empty() || !differing.is_empty() {
+        std::process::exit(1);
+    }
     Ok(())
 }
 

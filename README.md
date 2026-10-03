@@ -27,6 +27,7 @@ Commands:
   unpack         Unpack .pak file
   pack           Pack directory into .pak file
   get            Reads a single file to stdout
+  diff           Compare two .pak files and list differences (exit code 1 when different)
   endpoint-test  Test endpoint configuration (AES) - FModel compatible
   help           Print this message or the help of the given subcommand(s)
 
@@ -62,6 +63,24 @@ assets/AssetA.uexp
 $ vrepak --aes-key 0x12345678 unpack MyEncryptedGame.pak
 Unpacked 12345 files to MyEncryptedGame from MyEncryptedGame.pak
 ```
+
+### comparing two paks
+
+```console
+$ vrepak diff old.pak new.pak
+--- old.pak (V11, 4 files)
++++ new.pak (V11, 5 files)
+Only in old.pak (0):
+Only in new.pak (1):
+  point/root/extra.txt
+Differing (0):
+Identical files: 4
+```
+
+Lists files only present on either side plus files with different content
+(compared by size, then SHA256). Exits with code 1 when the paks differ, so
+it composes with scripts. `--names-only` skips content hashing. In the GUI,
+fill *Pak file 2* and press *Diff vs below*.
 
 ### endpoint configuration (AES)
 

@@ -229,6 +229,107 @@ fn pak_unpack_with_key(
     Ok(format!("Unpacked {count} files to {out_dir}"))
 }
 
+fn pak_diff_text(
+    pak_path1: &str,
+    pak_path2: &str,
+    aes_key: Option<String>,
+    endpoint: Option<String>,
+    expression: Option<String>,
+    engine: vrepak::Engine,
+) -> Result<String, String> {
+    use std::collections::BTreeMap;
+
+    fn open(
+        pak_path: &str,
+        aes_key: &Option<String>,
+        endpoint: &Option<String>,
+        expression: &Option<String>,
+        engine: vrepak::Engine,
+    ) -> Result<vrepak::PakReader, String> {
+        let (key, _, _) = resolve_key_for_pak(pak_path, aes_key.clone(), endpoint.clone(), expression.clone())?;
+        let mut builder = vrepak::PakBuilder::new().engine(engine);
+        if let Some(k) = key {
+            builder = builder.key(k);
+        }
+        let mut reader =
+            BufReader::new(File::open(pak_path).map_err(|e| e.to_string())?);
+        builder.reader(&mut reader).map_err(|e| e.to_string())
+    }
+    fn hash_file(
+        pak: &vrepak::PakReader,
+        pak_path: &str,
+        path: &str,
+    ) -> Result<Vec<u8>, String> {
+        use sha2::Digest;
+
+        let mut hasher = sha2::Sha256::new();
+        let mut reader =
+            BufReader::new(File::open(pak_path).map_err(|e| e.to_string())?);
+        pak.read_file(path, &mut reader, &mut hasher)
+            .map_err(|e| e.to_string())?;
+        Ok(hasher.finalize().to_vec())
+    }
+
+    let pak1 = open(pak_path1, &aes_key, &endpoint, &expression, engine)?;
+    let pak2 = open(pak_path2, &aes_key, &endpoint, &expression, engine)?;
+    let prefix = std::path::Path::new("../../../");
+    let mut map1 = BTreeMap::new();
+    let mut map2 = BTreeMap::new();
+    for (pak, map) in [(&pak1, &mut map1), (&pak2, &mut map2)] {
+        let mount = PathBuf::from(pak.mount_point());
+        for f in pak.files() {
+            let stripped = mount
+                .join(&f)
+                .strip_prefix(prefix)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            let size = pak.entry_info(&f).map(|i| i.uncompressed_size).unwrap_or(0);
+            map.insert(stripped, (f, size));
+        }
+    }
+
+    let mut out = format!(
+        "--- {pak_path1} ({}, {} files)\n+++ {pak_path2} ({}, {} files)\n",
+        pak1.version(),
+        map1.len(),
+        pak2.version(),
+        map2.len()
+    );
+    let only1: Vec<&String> = map1.keys().filter(|k| !map2.contains_key(*k)).collect();
+    let only2: Vec<&String> = map2.keys().filter(|k| !map1.contains_key(*k)).collect();
+    out.push_str(&format!("Only in {pak_path1} ({}):\n", only1.len()));
+    for f in &only1 {
+        out.push_str(&format!("  {f}\n"));
+    }
+    out.push_str(&format!("Only in {pak_path2} ({}):\n", only2.len()));
+    for f in &only2 {
+        out.push_str(&format!("  {f}\n"));
+    }
+    let mut differing = vec![];
+    let mut identical = 0;
+    for f in map1.keys().filter(|k| map2.contains_key(*k)) {
+        let (p1, s1) = &map1[f];
+        let (p2, s2) = &map2[f];
+        if s1 != s2 {
+            differing.push(format!("  {f} ({s1} -> {s2} bytes)"));
+        } else if hash_file(&pak1, pak_path1, p1).map_err(|e| e.to_string())?
+            != hash_file(&pak2, pak_path2, p2).map_err(|e| e.to_string())?
+        {
+            differing.push(format!("  {f} ({s1} bytes, content differs)"));
+        } else {
+            identical += 1;
+        }
+    }
+    differing.sort();
+    out.push_str(&format!("Differing ({}):\n", differing.len()));
+    for d in &differing {
+        out.push_str(&format!("{d}\n"));
+    }
+    out.push_str(&format!("Identical files: {identical}\n"));
+    Ok(out)
+}
+
 fn pak_pack_text(
     input: &str,
     output: &str,
@@ -372,6 +473,7 @@ struct GuiApp {
     expr_report: String,
     status: (String, StatusKind),
     pak_path: String,
+    pak_path2: String,
     aes_key: String,
     engine: vrepak::Engine,
     pak_output: String,
@@ -402,6 +504,7 @@ impl GuiApp {
                 StatusKind::Info,
             ),
             pak_path: String::new(),
+            pak_path2: String::new(),
             aes_key: String::new(),
             engine: vrepak::Engine::Stock,
             pak_output: String::new(),
@@ -655,6 +758,37 @@ impl GuiApp {
         );
     }
 
+    fn on_diff(&mut self) {
+        if self.busy
+            || self.pak_path.trim().is_empty()
+            || self.pak_path2.trim().is_empty()
+        {
+            return;
+        }
+        let pak1 = self.pak_path.clone();
+        let pak2 = self.pak_path2.clone();
+        let (ep, ex) = self.endpoint_args();
+        let aes = if self.aes_key.trim().is_empty() {
+            None
+        } else {
+            Some(self.aes_key.clone())
+        };
+        let engine = self.engine;
+        self.set_status("Diffing…", StatusKind::Info);
+        self.spawn_job(move || match pak_diff_text(&pak1, &pak2, aes, ep, ex, engine) {
+            Ok(t) => JobResult::Pak {
+                text: t.clone(),
+                ok: true,
+                status: t.lines().last().unwrap_or("Diff done").to_string(),
+            },
+            Err(e) => JobResult::Pak {
+                text: e.clone(),
+                ok: false,
+                status: format!("Diff failed: {e}"),
+            },
+        });
+    }
+
     /// Single-line labeled field with an optional trailing button.
     /// Returns true when the button was clicked.
     /// Widths are computed from the space actually available, so the
@@ -764,7 +898,17 @@ impl GuiApp {
             if ui.button("Unpack").clicked() {
                 self.on_unpack();
             }
+            if ui.button("Diff vs below").clicked() {
+                self.on_diff();
+            }
         });
+        Self::field_row(
+            ui,
+            "Pak file 2 (diff)",
+            &mut self.pak_path2,
+            r"C:\games\other.pak",
+            None,
+        );
         let rows = Self::fill_rows(ui);
         ui.add(
             egui::TextEdit::multiline(&mut self.pak_output)

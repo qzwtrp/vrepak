@@ -167,6 +167,89 @@ fn test_cli_unpack_include() {
 }
 
 #[test]
+fn test_cli_diff_identical() {
+    let assert = cargo_bin_cmd!("vrepak")
+        .arg("diff")
+        .arg(PAK)
+        .arg(PAK)
+        .arg("-s")
+        .arg("../mount")
+        .assert();
+    assert.success().stdout(formatdoc! {r#"
+        --- ../vrepak/tests/packs/pack_v11.pak (V11, 4 files)
+        +++ ../vrepak/tests/packs/pack_v11.pak (V11, 4 files)
+        Only in ../vrepak/tests/packs/pack_v11.pak (0):
+        Only in ../vrepak/tests/packs/pack_v11.pak (0):
+        Differing (0):
+        Identical files: 4
+    "#});
+
+    // same, but skipping content hashing
+    let assert = cargo_bin_cmd!("vrepak")
+        .arg("diff")
+        .arg(PAK)
+        .arg(PAK)
+        .arg("-s")
+        .arg("../mount")
+        .arg("--names-only")
+        .assert();
+    assert.success().stdout(formatdoc! {r#"
+        --- ../vrepak/tests/packs/pack_v11.pak (V11, 4 files)
+        +++ ../vrepak/tests/packs/pack_v11.pak (V11, 4 files)
+        Only in ../vrepak/tests/packs/pack_v11.pak (0):
+        Only in ../vrepak/tests/packs/pack_v11.pak (0):
+        Differing (0):
+        Identical files: 4
+    "#});
+}
+
+#[test]
+fn test_cli_diff_different() {
+    let dir = tempfile::tempdir().unwrap();
+    let unpacked = dir.path().join("unpacked");
+    let extra_pak = dir.path().join("extra.pak");
+
+    // unpack, add one file, repack
+    cargo_bin_cmd!("vrepak")
+        .arg("unpack")
+        .arg(PAK)
+        .arg("-s")
+        .arg("../mount")
+        .arg("-o")
+        .arg(&unpacked)
+        .assert()
+        .success();
+    std::fs::write(unpacked.join("point/root/extra.txt"), "extra").unwrap();
+    cargo_bin_cmd!("vrepak")
+        .arg("pack")
+        .arg(&unpacked)
+        .arg("-m")
+        .arg("../mount")
+        .arg("--version")
+        .arg("V11")
+        .arg(&extra_pak)
+        .assert()
+        .success();
+
+    let assert = cargo_bin_cmd!("vrepak")
+        .arg("diff")
+        .arg(PAK)
+        .arg(&extra_pak)
+        .arg("-s")
+        .arg("../mount")
+        .assert();
+    assert.failure().stdout(formatdoc! {r#"
+        --- ../vrepak/tests/packs/pack_v11.pak (V11, 4 files)
+        +++ {} (V11, 5 files)
+        Only in ../vrepak/tests/packs/pack_v11.pak (0):
+        Only in {} (1):
+          point/root/extra.txt
+        Differing (0):
+        Identical files: 4
+    "#, extra_pak.to_string_lossy(), extra_pak.to_string_lossy()});
+}
+
+#[test]
 fn test_cli_hashlist() {
     let assert = cargo_bin_cmd!("vrepak")
         .arg("hash-list")

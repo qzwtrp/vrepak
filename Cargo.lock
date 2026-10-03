@@ -4353,6 +4353,7 @@ dependencies = [
  "open",
  "rfd",
  "serde_json",
+ "sha2",
  "strum 0.27.2",
  "vrepak",
  "vrepak_endpoint",
