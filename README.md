@@ -196,11 +196,16 @@ $ cargo run -p vrepak_gui
 |              | 10      | PathHashIndex         | :grey_question:    | :grey_question:        |
 | 4.26-5.3[^2] | 11      | Fnv64BugFix           | :heavy_check_mark: | :heavy_check_mark:     |
 
-| Feature         | Read               | Write           |
-|-----------------|--------------------|-----------------|
-| Compression     | :heavy_check_mark: | :wavy_dash:[^3] |
-| Encrypted Index | :heavy_check_mark: | :x:             |
-| Encrypted Data  | :heavy_check_mark: | :x:             |
+| Engine profile (`--engine`)                        | Read               | Write                  |
+|----------------------------------------------------|--------------------|------------------------|
+| `stock` (plain Unreal Engine)                      | :heavy_check_mark: | :heavy_check_mark:     |
+| `wuthering-waves` (`GAME_WutheringWaves`, Kuro modded UE 4.26: scrambled V11+ index entries, partially encrypted file data) | :heavy_check_mark: | :heavy_check_mark:[^4] |
+
+| Feature         | Read               | Write                 |
+|-----------------|--------------------|-----------------------|
+| Compression     | :heavy_check_mark: | :wavy_dash:[^3]       |
+| Encrypted Index | :heavy_check_mark: | :heavy_check_mark:[^4] |
+| Encrypted Data  | :heavy_check_mark: | :heavy_check_mark:[^4] |
 
 
 [^1]: Except for paks compressed using frozen index which has significant
@@ -208,9 +213,13 @@ $ cargo run -p vrepak_gui
 [^2]: As of writing. Later versions are likely supported but untested.
 [^3]: Zlib, Gzip, and Zstd are supported. Not all compression algorithms are
     available in all games.
+[^4]: Writing encrypted paks needs a key (`--aes-key`/`--endpoint` on pack,
+    or keys from `vrepak-manifest.json`); WuWa paks additionally need
+    `--engine wuthering-waves` (and matching `--wuwa-custom-data`).
 
-Supports reading encrypted (both index and/or data) and compressed paks.
-Writing does not support compression or encryption yet.
+Supports reading and writing encrypted (both index and/or data) and
+compressed paks. The unpack manifest (`vrepak-manifest.json`) records per-file
+keys/compression/encryption so a later `pack` restores them exactly.
 
 ## notes
 
